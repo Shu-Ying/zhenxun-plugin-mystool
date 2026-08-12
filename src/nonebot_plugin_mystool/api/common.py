@@ -48,8 +48,8 @@ URL_STARRAIL_NOTE_BBS = "https://api-takumi-record.mihoyo.com/game_record/app/hk
 URL_STARRAIL_NOTE_WIDGET = "https://api-takumi-record.mihoyo.com/game_record/app/hkrpg/aapi/widget"
 URL_CREATE_VERIFICATION = "https://bbs-api.miyoushe.com/misc/api/createVerification?is_high=true"
 URL_VERIFY_VERIFICATION = "https://bbs-api.miyoushe.com/misc/api/verifyVerification"
-URL_FETCH_GAME_TOKEN_QRCODE = "https://hk4e-sdk.mihoyo.com/hk4e_cn/combo/panda/qrcode/fetch"
-URL_QUERY_GAME_TOKEN_QRCODE = "https://hk4e-sdk.mihoyo.com/hk4e_cn/combo/panda/qrcode/query"
+URL_FETCH_GAME_TOKEN_QRCODE = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/createQRLogin"
+URL_QUERY_GAME_TOKEN_QRCODE = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/queryQRLoginStatus"
 URL_GET_TOKEN_BY_GAME_TOKEN = "https://api-takumi.mihoyo.com/account/ma-cn-session/app/getTokenByGameToken"
 URL_GET_COOKIE_TOKEN_BY_GAME_TOKEN = "https://api-takumi.mihoyo.com/auth/api/getCookieAccountInfoByGameToken"
 
@@ -321,6 +321,15 @@ HEADERS_STARRAIL_STATUS_WIDGET = {
 
     "Connection": "keep-alive",
     "Host": "api-takumi-record.mihoyo.com"
+}
+
+HEADERS_QR_LOGIN = {
+    "Accept": "application/json, text/plain, */*",
+    "User-Agent": "HYPContainer/1.3.3.182",
+    "Content-Type": "application/json",
+    "x-rpc-app_id": "ddxf5dufpuyo",
+    "x-rpc-client_type": "3",
+    "x-rpc-device_id": None,
 }
 
 IncorrectReturn = (KeyError, TypeError, AttributeError, IndexError, ValidationError, json.decoder.JSONDecodeError)
@@ -1712,31 +1721,30 @@ async def fetch_game_token_qrcode(
         retry: bool = True
 ) -> Tuple[BaseApiStatus, Optional[Tuple[str, str]]]:
     """
-    获取米游社扫码登录（GameToken）二维码
+    获取米游社扫码登录二维码
 
     :param device_id: 设备ID
-    :param app_id: 登录的应用标识符
+    :param app_id: 保留参数，不再使用（接口已迁移到 passport-api）
     :param retry: 是否允许重试
-    :return 其中 ``Tuple[str, str]`` 为二维码URL和用于查询二维码扫描状态的 ``token``
+    :return 其中 ``Tuple[str, str]`` 为二维码URL和用于查询扫描状态的 ticket
     """
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                content = {
-                    "app_id": app_id,
-                    "device": device_id,
-                }
+                headers = HEADERS_QR_LOGIN.copy()
+                headers["x-rpc-device_id"] = device_id
                 async with httpx.AsyncClient() as client:
                     res = await client.post(
                         URL_FETCH_GAME_TOKEN_QRCODE,
-                        json=content,
+                        headers=headers,
+                        content="{}",
                         timeout=plugin_config.preference.timeout
                     )
                 api_result = ApiResultHandler(res.json())
                 if api_result.retcode == 0:
                     qrcode_url = api_result.data["url"]
-                    url = urlparse(qrcode_url)
-                    return BaseApiStatus(success=True), (qrcode_url, parse_qs(url.query)["ticket"][0])
+                    ticket = str(api_result.data["ticket"])
+                    return BaseApiStatus(success=True), (qrcode_url, ticket)
                 else:
                     logger.debug(f"网络请求返回: {res.text}")
                     return BaseApiStatus(), None
@@ -1755,44 +1763,44 @@ async def query_game_token_qrcode(
         device_id: str,
         app_id: str = "1",
         retry: bool = True
-) -> Tuple[QueryGameTokenQrCodeStatus, Optional[Tuple[str, str]]]:
+) -> Tuple[QueryGameTokenQrCodeStatus, Optional[Tuple[str, str, str]]]:
     """
-    查询米游社扫码登录（GameToken）二维码扫描状态
+    查询米游社扫码登录二维码扫描状态
 
-    :param ticket: 生成二维码时返回的 URL 参数中 ``ticket`` 字段的值
+    :param ticket: 生成二维码时返回的 ticket 值
     :param device_id: 设备ID
-    :param app_id: 登录的应用标识符
+    :param app_id: 保留参数，不再使用
     :param retry: 是否允许重试
-    :return 其中 ``Tuple[str, str]`` 为米游社账号ID和 GameToken
+    :return 其中 ``Tuple[str, str, str]`` 为米游社账号ID、stoken_v2 和 mid
     """
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                content = {
-                    "app_id": app_id,
-                    "device": device_id,
-                    "ticket": ticket
-                }
+                headers = HEADERS_QR_LOGIN.copy()
+                headers["x-rpc-device_id"] = device_id
                 async with httpx.AsyncClient() as client:
                     res = await client.post(
                         URL_QUERY_GAME_TOKEN_QRCODE,
-                        json=content,
+                        headers=headers,
+                        json={"ticket": ticket},
                         timeout=plugin_config.preference.timeout
                     )
                 api_result = ApiResultHandler(res.json())
                 if api_result.retcode == 0:
-                    if api_result.data["stat"] == "Init":
+                    status = api_result.data.get("status", "")
+                    if status == "Created":
                         return QueryGameTokenQrCodeStatus(qrcode_init=True), None
-                    elif api_result.data["stat"] == "Scanned":
+                    elif status == "Scanned":
                         return QueryGameTokenQrCodeStatus(qrcode_scanned=True), None
+                    elif status == "Confirmed":
+                        tokens = api_result.data.get("tokens", [])
+                        stoken = next((t.get("token") for t in tokens if t.get("token")), None)
+                        uid = str(api_result.data.get("user_info", {}).get("aid", ""))
+                        mid = api_result.data.get("user_info", {}).get("mid", "")
+                        return QueryGameTokenQrCodeStatus(success=True), (uid, stoken, mid)
                     else:
-                        payload_raw = api_result.data["payload"]["raw"]
-                        parsed_payload: Dict[str, str] = json.loads(payload_raw)
-                        return QueryGameTokenQrCodeStatus(success=True), (
-                            parsed_payload["uid"],
-                            parsed_payload["token"]
-                        )
-                elif api_result.retcode == -106:
+                        return QueryGameTokenQrCodeStatus(), None
+                elif api_result.retcode in (-106, -3501):
                     return QueryGameTokenQrCodeStatus(qrcode_expired=True), None
                 else:
                     return QueryGameTokenQrCodeStatus(), None
