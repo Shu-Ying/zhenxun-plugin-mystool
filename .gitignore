@@ -149,4 +149,4 @@ data/
 !/.comet/config.yaml
 # <<< Comet managed project state <<<
 
-test/
+tests/*
