@@ -2,13 +2,17 @@ import nonebot
 from nonebot import require
 from nonebot.plugin import PluginMetadata
 
-require("nonebot_plugin_saa")
+require("nonebot_plugin_alconna")
 require("nonebot_plugin_apscheduler")
 
 _driver = nonebot.get_driver()
-_command_begin = list(_driver.config.command_start)[0]
+_command_begin = next(iter(_driver.config.command_start), "")
 
 from . import _version
+from .model.config import plugin_config, zhenxun_configs
+from zhenxun.configs.utils import Command, PluginExtraData
+
+_command_begin += plugin_config.preference.command_start
 
 __version__ = _version.__version__
 __plugin_meta__ = PluginMetadata(
@@ -35,7 +39,17 @@ __plugin_meta__ = PluginMetadata(
     f"\n📖 {_command_begin}帮助 ➢ 查看帮助信息"
     f"\n🔍 {_command_begin}帮助 <功能名> ➢ 查看目标功能详细说明"
     "\n\n⚠️你的数据将经过机器人服务器，请确定你信任服务器所有者再使用。",
-    extra={"version": __version__}
+    extra=PluginExtraData(
+        author="Ljzd-PRO / Everything0519",
+        version=__version__,
+        menu_type="米游社",
+        commands=[Command(command=plugin_config.preference.command_start + name)
+                  for name in ("登录", "地址", "签到", "任务", "兑换", "商品",
+                               "原神便笺", "铁道便笺", "设置", "账号设置",
+                               "通知设置", "导出Cookies", "用户绑定",
+                               "私信响应", "帮助")],
+        configs=zhenxun_configs,
+    ).to_dict()
 )
 
 # 升级 V1 版本插件数据文件

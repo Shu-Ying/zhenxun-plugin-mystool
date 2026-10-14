@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, Literal, NamedTuple, no_type_check, Union, Dict, Any, TypeVar, Tuple
 
 import pytz
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 
 __all__ = ["root_path", "data_path", "BaseModelWithSetter", "BaseModelWithUpdate", "Good", "GameRecord", "GameInfo",
            "Address", "MmtData",

@@ -25,8 +25,9 @@ except ImportError:
 
 from nonebot import Adapter, Bot
 
-from nonebot_plugin_saa import MessageSegmentFactory, Text, AggregatedMessageFactory, TargetQQPrivate, \
-    TargetQQGuildDirect, enable_auto_select_bot
+from nonebot_plugin_alconna import Target, UniMessage
+from zhenxun.utils.message import MessageUtils
+from zhenxun.utils.platform import PlatformUtils
 
 from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, PrivateMessageEvent, GroupMessageEvent, \
     Adapter as OneBotV11Adapter, Bot as OneBotV11Bot
@@ -45,8 +46,7 @@ __all__ = ["GeneralMessageEvent", "GeneralPrivateMessageEvent", "GeneralGroupMes
            "send_private_msg", "get_unique_users", "get_all_bind", "read_blacklist", "read_whitelist",
            "read_admin_list"]
 
-# 启用 nonebot-plugin-send-anything-anywhere 的自动选择 Bot 功能
-enable_auto_select_bot()
+# 使用真寻消息模块，主动消息按调用方指定的 Bot 或 Adapter 选择目标
 
 GeneralMessageEvent = OneBotV11MessageEvent, MessageCreateEvent, DirectMessageCreateEvent, MessageEvent
 """消息事件类型"""
@@ -96,6 +96,9 @@ def set_logger(_logger: "Logger"):
     """
     给日志记录器对象增加输出到文件的Handler
     """
+    if not plugin_config.preference.enable_log_output or plugin_config.preference.log_path is None:
+        return _logger
+    plugin_package = __name__.split(".utils", 1)[0]
     # 根据"name"筛选日志，如果在 plugins 目录加载，则通过 LOG_HEAD 识别
     # 如果不是插件输出的日志，但是与插件有关，则也进行保存
     logger.add(
@@ -103,7 +106,9 @@ def set_logger(_logger: "Logger"):
         diagnose=False,
         format=nonebot.log.default_format,
         rotation=plugin_config.preference.log_rotation,
-        filter=lambda x: x["name"] == plugin_config.preference.plugin_name or (
+        filter=lambda x: x["name"] == plugin_package or (
+                x["name"] or ""
+        ).startswith(plugin_package + ".") or x["name"] == plugin_config.preference.plugin_name or (
                 plugin_config.preference.log_head != "" and x["message"].find(plugin_config.preference.log_head) == 0
         ) or x["message"].find(f"plugins.{plugin_config.preference.plugin_name}") != -1
     )
@@ -114,7 +119,7 @@ def set_logger(_logger: "Logger"):
 logger = set_logger(logger)
 """本插件所用日志记录器对象（包含输出到文件）"""
 
-PLUGIN = nonebot.plugin.get_plugin(plugin_config.preference.plugin_name)
+PLUGIN = nonebot.plugin.get_plugin_by_module_name(__name__)
 '''本插件数据'''
 
 if not PLUGIN:
@@ -347,9 +352,9 @@ def generate_qr_img(data: str):
 
 async def send_private_msg(
         user_id: str,
-        message: Union[str, MessageSegmentFactory, AggregatedMessageFactory],
+        message: Union[str, UniMessage],
         use: Union[Bot, Adapter] = None,
-        guild_id: int = None
+        guild_id: Union[str, int, None] = None
 ) -> Tuple[bool, Optional[Exception]]:
     """
     主动发送私信消息
@@ -360,9 +365,9 @@ async def send_private_msg(
     :param guild_id: 用户所在频道ID，为None则从用户数据中获取
     :return: (是否发送成功, ActionFailed Exception)
     """
-    user_id_int = int(user_id)
-    if isinstance(message, str):
-        message = Text(message)
+    user_id = str(user_id)
+    outgoing = (MessageUtils.build_message(message)
+                if isinstance(message, str) else message)
 
     # 整合符合条件的 Bot 对象
     if isinstance(use, (OneBotV11Bot, QQGuildBot)):
@@ -373,31 +378,40 @@ async def send_private_msg(
         bots = nonebot.get_bots().values()
 
     for bot in bots:
+        if not isinstance(bot, (OneBotV11Bot, QQGuildBot)):
+            continue
         try:
             # 获取 PlatformTarget 对象
             if isinstance(bot, OneBotV11Bot):
-                target = TargetQQPrivate(user_id=user_id_int)
                 logger.info(
-                    f"{plugin_config.preference.log_head}向用户 {user_id} 发送 QQ 聊天私信 user_id: {user_id_int}")
+                    f"{plugin_config.preference.log_head}向用户 {user_id} 发送 QQ 聊天私信")
+                receipt = await PlatformUtils.send_message(
+                    bot, user_id=user_id, group_id=None, message=outgoing
+                )
             else:
                 if guild_id is None:
                     if user := PluginDataManager.plugin_data.users.get(user_id):
                         if not (guild_id := user.qq_guild.get(user_id)):
                             logger.error(f"{plugin_config.preference.log_head}用户 {user_id} 数据中没有任何频道ID")
-                            return False, None
+                            return False, ValueError("用户数据中缺少来源频道ID")
                     else:
                         logger.error(
                             f"{plugin_config.preference.log_head}用户数据中不存在用户 {user_id}，无法获取频道ID")
-                        return False, None
-                target = TargetQQGuildDirect(recipient_id=user_id_int, source_guild_id=guild_id)
+                        return False, ValueError("用户数据不存在，无法获取来源频道ID")
+                target = Target(user_id, parent_id=str(guild_id),
+                                channel=True, private=True)
                 logger.info(f"{plugin_config.preference.log_head}向用户 {user_id} 发送 QQ 频道私信"
-                            f" recipient_id: {user_id_int}, source_guild_id: {guild_id}")
-
-            await message.send_to(target=target, bot=bot)
+                            f" recipient_id: {user_id}, source_guild_id: {guild_id}")
+                receipt = await outgoing.send(target=target, bot=bot,
+                                              fallback=False)
+            if receipt is None:
+                raise RuntimeError("消息发送未返回回执")
         except Exception as e:
+            logger.error(f"{plugin_config.preference.log_head}向用户 {user_id} 发送私信失败：{type(e).__name__}")
             return False, e
         else:
             return True, None
+    return False, RuntimeError("没有可用的受支持 Bot")
 
 
 def get_unique_users() -> Iterable[Tuple[str, UserData]]:

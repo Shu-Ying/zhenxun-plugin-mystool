@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from httpx import Cookies
 from nonebot.log import logger
-from pydantic import BaseModel, ValidationError, validator
+from pydantic.v1 import BaseModel, ValidationError, validator
 
 from ..._version import __version__
 from ...model.common import data_path, BaseModelWithSetter, Address, BaseModelWithUpdate, Good, GameRecord

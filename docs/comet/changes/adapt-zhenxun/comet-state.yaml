@@ -1,0 +1,350 @@
+schema: comet.native.v4
+name: adapt-zhenxun
+language: en
+phase: verify
+status: await-user
+state_version: 13
+brief: brief.md
+document_constraints_version: 2
+shape_confirmation_hash: ef2505556157844cb029096150374f69999636de073e7b7bf60bf59d139b4a79
+spec_changes:
+  - capability: zhenxun-integration
+    operation: create
+    source: specs/zhenxun-integration/spec.md
+workspace:
+  isolation: current
+  change_branch: stable
+  target_branch: stable
+  finish: null
+loop:
+  stage: await-user
+  goal_cycle: 1
+  iteration: 3
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 1
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: confirm-skill-coordinated-pass
+acceptance:
+  - id: A1
+    source: brief.md
+    text: The plugin loads in the target zhenxun environment without SAA, and its
+      metadata is available to zhenxun plugin management and help generation.
+    result: passed
+    reason:
+      text: 当前 __init__.py 注册真寻 PluginExtraData 和配置；轻量 require 入口隔离加载，无 SAA；真实宿主
+        _handle_config 和 _handle_setting 已由本轮 Runtime integration 14 passed 覆盖。
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: Interactive replies and proactive notifications preserve text and image
+      content, respect the selected bot/adapter and QQ guild context, and report
+      delivery failure without claiming success.
+    result: passed
+    reason:
+      text: common.py:353-414 保留 bool/exception 返回合同；OneBot 使用 PlatformUtils，QQ 使用真寻构造
+        UniMessage 和显式 source guild Target；空回执、缺 Bot 和异常均失败。测试覆盖文本图片、QQ 实际
+        exporter/模拟 API、指定 Adapter 及子模块失败日志落盘。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: Commands use the configured non-empty prefix (default 米游社); help examples
+      match the registered commands, and unprefixed zhenxun commands remain
+      usable.
+    result: passed
+    reason:
+      text: 配置在命令加载前解析，空前缀规范为米游社，已有自定义前缀保留；命令 Rule 检查排除裸签到/帮助/设置；plan.py 验证码提示现使用
+        COMMAND_BEGIN，README 示例一致。相关 Runtime integration 检查通过。
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: Explicit zhenxun configuration takes precedence over legacy configV2.json;
+      absent fields migrate from legacy configuration, then use defaults.
+      Existing account data, cookies, bindings and exchange plans remain
+      readable.
+    result: passed
+    reason:
+      text: 独立读取 zhenxun_config.py:13-103 和宿主生成流程：arg_parser
+        合并规范基线与显式稀疏值，_generate_simple_config 调用解析后写入 YAML，reload
+        再保存。test_sparse_yaml_migration_survives_host_generation 覆盖真实宿主生成、重载、旧
+        JSON 编辑/删除，plan_time 仍 03:45 且 timeout
+        31。账户/Cookies/绑定/兑换计划往返兼容测试通过，源数据模型差异仅 pydantic.v1 import。
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: Scheduled sign-in, coin tasks and note reminders retain their timing and
+      notification switches; focused checks do not contact production accounts.
+    result: passed
+    reason:
+      text: 当前计划任务声明及用户通知/自动任务开关相对基线未改；每日 cron 使用迁移后的 plan_time，便笺 interval 使用
+        resin_interval。Runtime 隔离测试检查 daily_schedule 和 resin_check，未启动真实签到兑换。
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: Documentation explains installation, command/configuration changes and
+      verification limits; dependencies permit the target environment.
+    result: passed
+    reason:
+      text: README 说明本地安装、require 入口、真寻目录限制、QQ 驱动、配置优先级和重启/验证边界；pyproject 不再声明
+        SAA，Pydantic 2 通过 v1 兼容层。当前候选 Runtime syntax/lock/package exit
+        0，integration 14 passed；已核对正式日志。
+      truncated: false
+builder_handoff:
+  candidate_id: 56a10e05-5b8a-4d3b-af86-66ff9e442a40
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:24588774-c44e-40c9-8ddf-17e58fa291e9
+  iteration: 3
+  summary:
+    text: 补充修复完成：使用真寻 RegisterConfig.arg_parser 在宿主配置生成阶段补齐并校验配置组，确保迁移字段写入框架 YAML
+      和持久化数据，而不是在每次启动依赖旧JSON。新增跨宿主生成、重载、旧JSON编辑及删除的回归测试；7项定向配置/加载检查通过。原消息、数据格式和调度范围保持。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+  acceptance_review:
+    - id: A1
+      status: implemented-with-evidence
+      evidence:
+        - src/nonebot_plugin_mystool/__init__.py
+        - zhenxun_loader.py
+        - tests/test_zhenxun_integration.py::test_loading_and_metadata
+        - tests/test_zhenxun_integration.py::test_framework_configuration_and_plugin_registration
+      note: 无 SAA 的轻量 require 入口已实际加载，元数据经真寻注册函数处理。
+    - id: A2
+      status: implemented-with-evidence
+      evidence:
+        - src/nonebot_plugin_mystool/utils/common.py::send_private_msg
+        - src/nonebot_plugin_mystool/command/plan.py::perform_game_sign
+        - tests/test_zhenxun_integration.py::test_private_message_text_image_and_failure
+        - tests/test_zhenxun_integration.py::test_guild_image_export_and_adapter_selection
+        - tests/test_zhenxun_integration.py::test_private_send_failure_is_written_to_plugin_log
+      note: 发送保留返回元组、Bot/Adapter 选择及 guild 上下文，错误不返回成功；真实 QQ exporter 生成图片后模拟 API。
+        新发送错误已验证写入插件日志文件。
+    - id: A3
+      status: implemented-with-evidence
+      evidence:
+        - src/nonebot_plugin_mystool/model/zhenxun_config.py::load_config
+        - tests/test_zhenxun_integration.py::test_prefixed_command_rules_leave_host_commands_available
+        - tests/test_zhenxun_integration.py::test_configuration_precedence_and_persistence
+        - src/nonebot_plugin_mystool/command/plan.py::perform_game_sign captcha
+          prompt
+        - tests/test_zhenxun_integration.py::test_verification_prompt_uses_configured_prefix
+        - README.md command prefix note corrected
+      note: 默认和自定义前缀均保留；验证码提示实际分支经模拟签到检查显示 /custom账号设置，旧裸命令被排除。
+    - id: A4
+      status: implemented-with-evidence
+      evidence:
+        - src/nonebot_plugin_mystool/model/zhenxun_config.py
+        - tests/test_zhenxun_integration.py::test_configuration_precedence_and_persistence
+        - tests/test_zhenxun_integration.py::test_yaml_configuration_and_legacy_prefix
+        - tests/test_zhenxun_integration.py::test_account_data_and_scheduler_contract
+        - src/nonebot_plugin_mystool/model/zhenxun_config.py::group_parser
+        - tests/test_zhenxun_integration.py::test_sparse_yaml_migration_survives_host_generation
+      note: 明确真寻配置优先；缺失字段经旧JSON迁移且在真实宿主生成和 reload 后持久化；旧JSON编辑或删除不会改变已迁移
+        plan_time，原账号数据兼容仍保留。
+    - id: A5
+      status: implemented-with-evidence
+      evidence:
+        - src/nonebot_plugin_mystool/command/plan.py scheduled_job declarations
+          unchanged
+        - tests/test_zhenxun_integration.py::test_account_data_and_scheduler_contract
+      note: 未改造调度声明及原用户开关；测试核对每日和便笺任务声明，未运行真实任务。
+    - id: A6
+      status: implemented-with-evidence
+      evidence:
+        - README.md
+        - pyproject.toml
+        - poetry.lock
+        - .github/workflows/plugin-test.yml
+        - development poetry check --lock and poetry build exited 0
+      note: 锁文件和打包成功；文档说明真实目录加载限制、入口安装、配置迁移和验证边界。
+  checks:
+    - name:
+        text: configuration-and-loading-regressions
+        truncated: false
+      result: passed
+      note:
+        text: 7 passed, 7 deselected; includes sparse YAML -> host generate -> reload ->
+          legacy edit/delete persistence.
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: 实际 Bot 送达、QQ 主动私信额度及审核未验证。
+      truncated: false
+    - text: 本地运行 Python 3.13；CI Python 3.10/3.11/3.12 未在本机执行，也未运行远程 CI。
+      truncated: false
+    - text: 代码适配与隔离集成验证完成，未安装到真寻生产环境或启动真实任务。
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-14T02:38:16.762Z
+blockers:
+  - owner: user
+    reason:
+      text: The generic Skill bridge cannot prove an independent Verifier execution;
+        user confirmation is required before Archive.
+      truncated: false
+    acceptance_ids: []
+    resolution_action: await-user
+verification:
+  candidate_id: 56a10e05-5b8a-4d3b-af86-66ff9e442a40
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:499642bc-89a7-4316-8172-14b6f19d4363
+  iteration: 3
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: integration
+      name:
+        text: integration
+        truncated: false
+      argv_display:
+        - text: -c
+          truncated: false
+        - text: import os, runpy, sys; os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';
+            os.environ['PYTHONUTF8']='1';
+            sys.argv=['pytest','tests/test_zhenxun_integration.py','-q','--disable-warnings'];
+            runpy.run_module('pytest',run_name='__main__')
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 11058
+    - id: syntax
+      name:
+        text: syntax
+        truncated: false
+      argv_display:
+        - text: -m
+          truncated: false
+        - text: ruff
+          truncated: false
+        - text: check
+          truncated: false
+        - text: src
+          truncated: false
+        - text: tests/test_zhenxun_integration.py
+          truncated: false
+        - text: zhenxun_loader.py
+          truncated: false
+        - text: --select
+          truncated: false
+        - text: E9,F63,F7,F82
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 186
+    - id: lock
+      name:
+        text: lock
+        truncated: false
+      argv_display:
+        - text: poetry
+          truncated: false
+        - text: check
+          truncated: false
+        - text: --lock
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 3360
+    - id: package
+      name:
+        text: package
+        truncated: false
+      argv_display:
+        - text: poetry
+          truncated: false
+        - text: build
+          truncated: false
+        - text: --output
+          truncated: false
+        - text: C:\Users\111\AppData\Local\Temp\mystool-zhenxun-build-20261014
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 2387
+  summary:
+    text: 对本轮最终候选独立核对全部 A1-A6，全部通过；复用并读取当前绑定 Runtime 四项正式通过回执，未重复完整套件。确认稀疏 YAML
+      在真实宿主生成/reload 后持久化迁移值，编辑或删除旧 JSON 不改变已迁移 plan_time；仍保留真实送达和 CI 限制。
+    truncated: false
+  risks:
+    - text: 真实 Bot 送达、QQ 主动私信额度和审核未验证；当前验证仅静态源码与隔离模拟集成。
+      truncated: false
+    - text: 本机验证 Python 3.13；未执行 CI Python 3.10/3.11/3.12 或远程 CI，Poetry
+        存在元数据弃用告警但检查退出码为 0。
+      truncated: false
+    - text: 未安装到真寻生产环境或运行真实账号任务。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-14T02:42:17.012Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A3
+    summary:
+      text: 独立核对全部 A1-A6，复用当前候选 Runtime 四项通过检查，未重复测试。A1/A2/A4/A5/A6 通过，A3
+        因残留不可用命令提示失败，需修复；另确认插件关键文件日志过滤风险。
+      truncated: false
+    completed_at: 2026-10-14T02:26:41.433Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 对当前候选独立核对 A1-A6，全部通过；复用有效的本轮 Runtime 四项通过回执，未重复整套检查。已确认旧账号设置提示及 README
+        修复、子模块错误日志落盘回归。通过范围限于源码及隔离模拟集成，不代表生产送达或远程 CI 已通过。
+      truncated: false
+    completed_at: 2026-10-14T02:33:42.403Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 补充临时验证已复现稀疏 YAML 经宿主生成后丢失迁移字段，后续旧 JSON 编辑影响
+        plan_time。按已确认的框架持久化范围修复实现，不改变需求，不接受或归档旧结果。
+      truncated: false
+    completed_at: 2026-10-14T02:36:21.077Z
+  - goal_cycle: 1
+    iteration: 3
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 对本轮最终候选独立核对全部 A1-A6，全部通过；复用并读取当前绑定 Runtime 四项正式通过回执，未重复完整套件。确认稀疏 YAML
+        在真实宿主生成/reload 后持久化迁移值，编辑或删除旧 JSON 不改变已迁移 plan_time；仍保留真实送达和 CI 限制。
+      truncated: false
+    completed_at: 2026-10-14T02:42:17.012Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: false
+created_at: 2026-10-14T01:53:20.526Z

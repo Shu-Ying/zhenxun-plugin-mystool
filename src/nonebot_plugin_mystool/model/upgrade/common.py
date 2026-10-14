@@ -1,7 +1,7 @@
 from typing import Union, Optional, Dict, TYPE_CHECKING
 
 from nonebot.log import logger
-from pydantic import BaseSettings
+from pydantic.v1 import BaseSettings
 
 from ..._version import __version__
 from ...model.common import data_path

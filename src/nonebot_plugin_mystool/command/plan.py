@@ -13,8 +13,8 @@ from nonebot.exception import ActionFailed
 from nonebot.internal.matcher import Matcher
 from nonebot.params import CommandArg
 from nonebot_plugin_apscheduler import scheduler
-from nonebot_plugin_saa import Image
-from pydantic import BaseModel
+from zhenxun.utils.message import MessageUtils
+from pydantic.v1 import BaseModel
 
 from ..api import BaseGameSign
 from ..api import BaseMission, get_missions_state
@@ -297,7 +297,7 @@ async def perform_game_sign(
                         message = f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到时服务器返回登录失效，请尝试重新登录绑定账户"
                     elif sign_status.need_verify:
                         message = (f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到时可能遇到验证码拦截，"
-                                   "请尝试使用命令『/账号设置』更改设备平台，若仍失败请手动前往米游社签到")
+                                   f"请尝试使用命令『{COMMAND_BEGIN}账号设置』更改设备平台，若仍失败请手动前往米游社签到")
                     else:
                         message = f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到失败，请稍后再试"
                     if matcher:
@@ -312,7 +312,7 @@ async def perform_game_sign(
 
             # 用户打开通知或手动签到时，进行通知
             if user.enable_notice or matcher:
-                onebot_img_msg, saa_img, qq_guild_img_msg = "", "", ""
+                onebot_img_msg, notice_image, qq_guild_img_msg = "", None, ""
                 get_info_status, info = await signer.get_info(account.platform)
                 get_award_status, awards = await signer.get_rewards()
                 if not get_info_status or not get_award_status:
@@ -329,9 +329,12 @@ async def perform_game_sign(
                               f"\n{award.name} * {award.cnt}" \
                               f"\n\n📅本月签到次数：{info.total_sign_day}"
                         img_file = await get_file(award.icon)
-                        onebot_img_msg = OneBotV11MessageSegment.image(img_file)
-                        saa_img = Image(img_file)
-                        qq_guild_img_msg = QQGuildMessageSegment.file_image(img_file)
+                        if img_file:
+                            onebot_img_msg = OneBotV11MessageSegment.image(img_file)
+                            notice_image = img_file
+                            qq_guild_img_msg = QQGuildMessageSegment.file_image(img_file)
+                        else:
+                            logger.warning(f"{plugin_config.preference.log_head}签到奖励图片下载失败，仅发送文字结果")
                     else:
                         msg = (f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到失败！请尝试重新签到，"
                                "若多次失败请尝试重新登录绑定账户")
@@ -345,14 +348,14 @@ async def perform_game_sign(
                     except (ActionFailed, AuditException):
                         pass
                 else:
+                    notification = MessageUtils.build_message(
+                        [msg, notice_image] if notice_image else msg
+                    )
                     for adapter in get_adapters().values():
-                        if isinstance(adapter, OneBotV11Adapter):
+                        if isinstance(adapter, (OneBotV11Adapter, QQGuildAdapter)):
                             for user_id in user_ids:
-                                await send_private_msg(use=adapter, user_id=user_id, message=msg + saa_img)
-                        elif isinstance(adapter, QQGuildAdapter):
-                            for user_id in user_ids:
-                                await send_private_msg(use=adapter, user_id=user_id, message=msg)
-                                await send_private_msg(use=adapter, user_id=user_id, message=qq_guild_img_msg)
+                                await send_private_msg(use=adapter, user_id=user_id,
+                                                       message=notification)
             await asyncio.sleep(plugin_config.preference.sleep_time)
 
         if msgs_list:

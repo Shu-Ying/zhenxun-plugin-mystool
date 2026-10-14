@@ -1,7 +1,16 @@
-name: Nonebot Plugin Test
+name: Zhenxun Integration Test
 
 on:
   workflow_dispatch:
+    inputs:
+      zhenxun-repository:
+        description: Zhenxun host repository
+        default: zhenxun-org/zhenxun_bot
+        type: string
+      zhenxun-ref:
+        description: Host branch or commit (empty uses its default branch)
+        default: ""
+        type: string
   push:
     branches: [ "stable", "dev" ]
     paths:
@@ -27,21 +36,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [ "3.9", "3.10", "3.11", "3.12" ]
-    name: nonebot2 plugin test
+        python-version: [ "3.10", "3.11", "3.12" ]
+    name: zhenxun plugin test
     permissions:
-      issues: read
-    outputs:
-      result: ${{ steps.plugin-test.outputs.RESULT }}
-      output: ${{ steps.plugin-test.outputs.OUTPUT }}
-      metadata: ${{ steps.plugin-test.outputs.METADATA }}
+      contents: read
+    env:
+      ZHENXUN_ROOT: ${{ github.workspace }}/.host/zhenxun_bot
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout Zhenxun host
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.zhenxun-repository || 'zhenxun-org/zhenxun_bot' }}
+          ref: ${{ inputs.zhenxun-ref || '' }}
+          path: .host/zhenxun_bot
       - name: Setup Python environment
         uses: ./.github/actions/setup-python
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install host dependencies
+        run: poetry run pip install -e .host/zhenxun_bot
       - name: Test Plugin
-        id: plugin-test
         run: |
-          poetry run python -m tests.plugin_test
+          poetry run python -m pytest tests/test_zhenxun_integration.py -q

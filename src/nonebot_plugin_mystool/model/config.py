@@ -6,7 +6,7 @@ from typing import Union, Optional, Tuple, Any, Dict, TYPE_CHECKING
 
 import nonebot
 from nonebot.log import logger
-from pydantic import BaseModel, BaseSettings, validator
+from pydantic.v1 import BaseModel, BaseSettings, validator
 
 from ..model.common import data_path
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 __all__ = ["plugin_config_path", "Preference",
            "GoodListImageConfig", "SaltConfig", "DeviceConfig", "PluginConfig", "PluginEnv", "plugin_config",
-           "plugin_env"]
+           "plugin_env", "zhenxun_configs"]
 
 plugin_config_path = data_path / "configV2.json"
 """插件数据文件默认路径"""
@@ -106,6 +106,8 @@ class Preference(BaseModel):
 
     @validator("log_path", allow_reuse=True)
     def _(cls, v: Optional[Path]):
+        if v is None:
+            return v
         absolute_path = v.absolute()
         if not os.path.exists(absolute_path) or not os.path.isfile(absolute_path):
             absolute_parent = absolute_path.parent
@@ -238,8 +240,8 @@ class DeviceConfig(BaseModel):
 
 
 class PluginConfig(BaseSettings):
-    preference = Preference()
-    good_list_image_config = GoodListImageConfig()
+    preference: Preference = Preference()
+    good_list_image_config: GoodListImageConfig = GoodListImageConfig()
 
 
 class PluginEnv(BaseSettings):
@@ -251,20 +253,9 @@ class PluginEnv(BaseSettings):
         env_file = '.env'
 
 
-if plugin_config_path.exists() and plugin_config_path.is_file():
-    plugin_config = PluginConfig.parse_file(plugin_config_path)
-else:
-    plugin_config = PluginConfig()
-    try:
-        str_data = plugin_config.json(indent=4)
-        plugin_config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(plugin_config_path, "w", encoding="utf-8") as f:
-            f.write(str_data)
-    except (AttributeError, TypeError, ValueError, PermissionError):
-        logger.exception(f"创建插件配置文件失败，请检查是否有权限读取和写入 {plugin_config_path}")
-        raise
-    else:
-        logger.info(f"插件配置文件 {plugin_config_path} 不存在，已创建默认插件配置文件。")
+from .zhenxun_config import load_config
+
+plugin_config, zhenxun_configs = load_config(PluginConfig, plugin_config_path)
 
 # TODO: 可能产生 #271 的问题 https://github.com/Ljzd-PRO/nonebot-plugin-mystool/issues/271
 # @_driver.on_startup

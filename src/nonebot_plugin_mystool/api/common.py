@@ -5,7 +5,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
 import tenacity
-from pydantic import ValidationError, BaseModel
+from pydantic.v1 import ValidationError, BaseModel
 from requests.utils import dict_from_cookiejar
 
 from ..model import GameRecord, GameInfo, Good, Address, BaseApiStatus, MmtData, GeetestResult, \
