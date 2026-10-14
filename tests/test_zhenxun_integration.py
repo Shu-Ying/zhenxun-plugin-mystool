@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+from importlib.abc import MetaPathFinder
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nonebot
 import pytest
+
+
+class BlockQQAdapter(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "nonebot.adapters.qq" or fullname.startswith(
+            "nonebot.adapters.qq."
+        ):
+            raise ModuleNotFoundError(
+                "QQ official adapter is unavailable", name=fullname
+            )
 
 
 def config_manager(directory):
@@ -31,6 +42,8 @@ def runtime(tmp_path_factory):
         ignore=shutil.ignore_patterns("__pycache__"),
     )
     original = Path.cwd()
+    blocker = BlockQQAdapter()
+    sys.meta_path.insert(0, blocker)
     sys.path[:0] = [str(workspace), str(root / "src")]
     os.chdir(workspace)
     nonebot.init(
@@ -40,33 +53,41 @@ def runtime(tmp_path_factory):
         superusers=set(),
     )
     from nonebot.adapters.onebot.v11 import Adapter
-    from nonebot.adapters.qq import Adapter as QQAdapter
 
     driver = nonebot.get_driver()
     driver.register_adapter(Adapter)
-    driver.register_adapter(QQAdapter)
     importlib.import_module("zhenxun.services")
     loaders = workspace / "external_plugins"
     loaders.mkdir()
     shutil.copyfile(root / "zhenxun_loader.py", loaders / "mystool_loader.py")
     nonebot.load_plugins(str(loaders))
-    plugin = nonebot.get_plugin("nonebot_plugin_mystool")
+    plugin = nonebot.get_plugin("zhenxun_plugin_mystool")
     assert plugin is not None
     yield SimpleNamespace(plugin=plugin, workspace=workspace, driver=driver)
+    sys.meta_path.remove(blocker)
     os.chdir(original)
 
 
 def test_loading_and_metadata(runtime):
     plugin = runtime.plugin
+    assert plugin.name == "zhenxun_plugin_mystool"
+    assert nonebot.get_plugin("nonebot_plugin_mystool") is None
     assert nonebot.get_plugin("nonebot_plugin_saa") is None
+    assert "nonebot.adapters.qq" not in sys.modules
+    assert plugin.metadata.supported_adapters == {"~onebot.v11"}
     assert plugin.metadata.extra["configs"]
     commands = plugin.metadata.extra["commands"]
     assert any(c["command"] == "米游社签到" for c in commands)
     assert plugin.metadata.extra["menu_type"] == "米游社"
     assert "米游社签到" in plugin.metadata.usage
-    from nonebot_plugin_mystool.model.config import plugin_config
+    assert "私信响应" not in plugin.metadata.usage
+    assert all("私信响应" not in c["command"] for c in commands)
+    from zhenxun_plugin_mystool.model.config import plugin_config
 
     assert plugin_config.preference.command_start == "米游社"
+    from zhenxun_plugin_mystool.model.common import data_path
+
+    assert data_path == runtime.workspace / "data" / "nonebot-plugin-mystool"
 
 
 def test_prefixed_command_rules_leave_host_commands_available(runtime):
@@ -86,6 +107,10 @@ def test_prefixed_command_rules_leave_host_commands_available(runtime):
             assert not asyncio.run(
                 rule(cmd=(original,), cmd_arg=None, cmd_whitespace=None)
             )
+        for removed in ("私信响应", "私聊响应", "请求响应"):
+            assert not asyncio.run(
+                rule(cmd=("米游社" + removed,), cmd_arg=None, cmd_whitespace=None)
+            )
     assert any(
         asyncio.run(rule(cmd=("米游社签到",), cmd_arg=None, cmd_whitespace=None))
         for rule in rules
@@ -94,8 +119,8 @@ def test_prefixed_command_rules_leave_host_commands_available(runtime):
 
 @pytest.mark.parametrize("custom_prefix", ["", "mys"])
 def test_configuration_precedence_and_persistence(runtime, tmp_path, custom_prefix):
-    from nonebot_plugin_mystool.model.config import PluginConfig
-    from nonebot_plugin_mystool.model import zhenxun_config
+    from zhenxun_plugin_mystool.model.config import PluginConfig
+    from zhenxun_plugin_mystool.model import zhenxun_config
 
     old = tmp_path / "configV2.json"
     old.write_text(
@@ -132,8 +157,8 @@ def test_configuration_precedence_and_persistence(runtime, tmp_path, custom_pref
 
 
 def test_invalid_configuration_does_not_persist(runtime, tmp_path):
-    from nonebot_plugin_mystool.model.config import PluginConfig
-    from nonebot_plugin_mystool.model import zhenxun_config
+    from zhenxun_plugin_mystool.model.config import PluginConfig
+    from zhenxun_plugin_mystool.model import zhenxun_config
 
     manager = config_manager(tmp_path)
     manager.add_plugin_config("mystool", "PREFERENCE", {"timeout": "bad"})
@@ -145,7 +170,7 @@ def test_invalid_configuration_does_not_persist(runtime, tmp_path):
 
 def test_private_message_text_image_and_failure(runtime):
     from nonebot.adapters.onebot.v11 import Bot
-    from nonebot_plugin_mystool.utils import common
+    from zhenxun_plugin_mystool.utils import common
     from zhenxun.utils.message import MessageUtils
 
     bot = Bot(nonebot.get_adapters()["OneBot V11"], "test-bot")
@@ -176,44 +201,27 @@ def test_private_message_text_image_and_failure(runtime):
         assert not ok and isinstance(error, RuntimeError)
 
 
-def test_guild_context_and_string_user_id(runtime):
-    from nonebot.adapters.qq import Bot
-    from nonebot_plugin_mystool.utils import common
-    from nonebot_plugin_alconna import UniMessage
+def test_selected_unsupported_bot_is_not_replaced(runtime):
+    from nonebot.adapters import Bot
+    from zhenxun_plugin_mystool.utils import common
 
-    from nonebot.adapters.qq.config import BotInfo
-
-    bot = Bot(
-        nonebot.get_adapters()["QQ"],
-        "guild-bot",
-        BotInfo(id="guild-bot", secret="test-only"),
-    )
-    send = AsyncMock(return_value=object())
-    with patch.object(UniMessage, "send", send):
-        result = asyncio.run(
-            common.send_private_msg(
-                "opaque-user", "hello", use=bot, guild_id="guild-source"
-            )
-        )
-    assert result == (True, None)
-    target = send.call_args.kwargs["target"]
-    assert target.id == "opaque-user"
-    assert target.parent_id == "guild-source"
-    assert target.private and target.channel
-    assert send.call_args.kwargs["fallback"] is False
-    assert not asyncio.run(common.send_private_msg("missing-user", "hello", use=bot))[0]
+    bot = MagicMock(spec=Bot)
+    with patch.object(nonebot, "get_bots") as all_bots:
+        ok, error = asyncio.run(common.send_private_msg("123", "hello", use=bot))
+    assert not ok and isinstance(error, RuntimeError)
+    all_bots.assert_not_called()
 
 
 def test_account_data_and_scheduler_contract(runtime):
-    from nonebot_plugin_mystool.model.data import (
+    from zhenxun_plugin_mystool.model.data import (
         PluginData,
         UserData,
         UserAccount,
         BBSCookies,
         ExchangePlan,
     )
-    from nonebot_plugin_mystool.model.common import Good
-    from nonebot_plugin_mystool.model.config import plugin_config
+    from zhenxun_plugin_mystool.model.common import Good
+    from zhenxun_plugin_mystool.model.config import plugin_config
     from nonebot_plugin_apscheduler import scheduler
 
     cookies = BBSCookies(stuid="123", stoken="test-token", cookie_token="test-cookie")
@@ -253,8 +261,8 @@ def test_account_data_and_scheduler_contract(runtime):
 
 
 def test_yaml_configuration_and_legacy_prefix(runtime, tmp_path):
-    from nonebot_plugin_mystool.model.config import PluginConfig
-    from nonebot_plugin_mystool.model import zhenxun_config
+    from zhenxun_plugin_mystool.model.config import PluginConfig
+    from zhenxun_plugin_mystool.model import zhenxun_config
 
     old = tmp_path / "configV2.json"
     old.write_text(
@@ -272,7 +280,7 @@ def test_yaml_configuration_and_legacy_prefix(runtime, tmp_path):
 
 
 def test_framework_configuration_and_plugin_registration(runtime):
-    from nonebot_plugin_mystool.model.config import plugin_config
+    from zhenxun_plugin_mystool.model.config import plugin_config
     from zhenxun.builtin_plugins.init import init_config, init_plugin
     from zhenxun.configs.config import Config
 
@@ -285,48 +293,43 @@ def test_framework_configuration_and_plugin_registration(runtime):
     assert Config.get_config("mystool", "PREFERENCE")["command_start"] == "米游社"
     plugins, limits = [], []
     asyncio.run(init_plugin._handle_setting(runtime.plugin, plugins, limits))
-    assert plugins[0].module == "nonebot_plugin_mystool"
+    assert plugins[0].module == "zhenxun_plugin_mystool"
     assert plugins[0].menu_type == "米游社"
     assert plugin_config.preference.command_start == "米游社"
 
 
-def test_guild_image_export_and_adapter_selection(runtime):
-    from nonebot.adapters.qq import Bot
-    from nonebot.adapters.qq.config import BotInfo
-    from nonebot_plugin_mystool.utils import common
+def test_onebot_image_export_and_adapter_selection(runtime):
+    from nonebot.adapters.onebot.v11 import Bot
+    from zhenxun_plugin_mystool.utils import common
     from zhenxun.utils.message import MessageUtils
 
-    adapter = nonebot.get_adapters()["QQ"]
-    bot = Bot(adapter, "guild-bot", BotInfo(id="guild-bot", secret="test-only"))
-    create_dm = AsyncMock(return_value=SimpleNamespace(guild_id="dm-id"))
-    send_dm = AsyncMock(return_value=SimpleNamespace(id="message-id"))
+    adapter = nonebot.get_adapters()["OneBot V11"]
+    bot = Bot(adapter, "12345")
+    send = AsyncMock(return_value={"message_id": 1})
     with (
         patch.object(adapter, "bots", {bot.self_id: bot}),
-        patch.object(Bot, "post_dms", create_dm),
-        patch.object(Bot, "send_to_dms", send_dm),
+        patch.object(Bot, "call_api", send),
     ):
         ok, error = asyncio.run(
             common.send_private_msg(
-                "user-id",
+                "123",
                 MessageUtils.build_message(["reward", b"image-bytes"]),
                 use=adapter,
-                guild_id="source-id",
             )
         )
     assert ok, error
-    create_dm.assert_awaited_once_with(
-        recipient_id="user-id", source_guild_id="source-id"
-    )
-    assert send_dm.call_args.kwargs["guild_id"] == "dm-id"
-    message = send_dm.call_args.kwargs["message"]
+    assert send.call_args.args[0] == "send_msg"
+    assert send.call_args.kwargs["message_type"] == "private"
+    assert send.call_args.kwargs["user_id"] == 123
+    message = send.call_args.kwargs["message"]
     assert message[0].data["text"] == "reward"
-    assert any(segment.type == "file_image" for segment in message)
+    assert any(segment.type == "image" for segment in message)
 
 
 def test_verification_prompt_uses_configured_prefix(runtime):
-    from nonebot_plugin_mystool.command import plan
-    from nonebot_plugin_mystool.model.data import BBSCookies, UserAccount, UserData
-    from nonebot_plugin_mystool.utils.common import CommandBegin
+    from zhenxun_plugin_mystool.command import plan
+    from zhenxun_plugin_mystool.model.data import BBSCookies, UserAccount, UserData
+    from zhenxun_plugin_mystool.utils.common import CommandBegin
 
     status = MagicMock(need_verify=True, login_expired=False)
     status.__bool__.return_value = False
@@ -354,7 +357,7 @@ def test_verification_prompt_uses_configured_prefix(runtime):
 
 def test_private_send_failure_is_written_to_plugin_log(runtime, tmp_path):
     from nonebot.adapters.onebot.v11 import Bot
-    from nonebot_plugin_mystool.utils import common
+    from zhenxun_plugin_mystool.utils import common
 
     bot = Bot(nonebot.get_adapters()["OneBot V11"], "test-bot")
     path = tmp_path / "mystool.log"
@@ -386,8 +389,8 @@ def test_private_send_failure_is_written_to_plugin_log(runtime, tmp_path):
 
 
 def test_sparse_yaml_migration_survives_host_generation(runtime, tmp_path):
-    from nonebot_plugin_mystool.model.config import PluginConfig
-    from nonebot_plugin_mystool.model import zhenxun_config
+    from zhenxun_plugin_mystool.model.config import PluginConfig
+    from zhenxun_plugin_mystool.model import zhenxun_config
     from zhenxun.builtin_plugins.init import init_config
 
     old = tmp_path / "configV2.json"
@@ -426,3 +429,34 @@ def test_sparse_yaml_migration_survives_host_generation(runtime, tmp_path):
         with patch.object(zhenxun_config, "Config", without_legacy):
             restored, _ = zhenxun_config.load_config(PluginConfig, old)
         assert restored.preference.plan_time == "03:45"
+
+
+@pytest.mark.parametrize("prefix", ["米游社", "/custom"])
+def test_friend_welcome_uses_plugin_help_prefix(runtime, prefix):
+    from nonebot.adapters.onebot.v11 import Bot, FriendRequestEvent
+    from zhenxun_plugin_mystool.command import user_check
+    from zhenxun_plugin_mystool.utils.common import CommandBegin
+
+    bot = Bot(nonebot.get_adapters()["OneBot V11"], "test-bot")
+    event = FriendRequestEvent(
+        time=1,
+        self_id=123,
+        post_type="request",
+        request_type="friend",
+        user_id=456,
+        comment="",
+        flag="test-request",
+    )
+    api = AsyncMock()
+    handler = user_check.friendRequest.handlers[0].call
+    with (
+        patch.object(Bot, "call_api", api),
+        patch.object(user_check.asyncio, "sleep", AsyncMock()),
+        patch.object(CommandBegin, "string", prefix),
+        patch.object(user_check.plugin_config.preference, "add_friend_accept", True),
+        patch.object(user_check.plugin_config.preference, "add_friend_welcome", True),
+    ):
+        asyncio.run(handler(bot, event))
+    assert api.await_args_list[0].args == ("set_friend_add_request",)
+    assert api.await_args_list[1].args == ("send_private_msg",)
+    assert f"『{prefix}帮助』" in api.await_args_list[1].kwargs["message"]

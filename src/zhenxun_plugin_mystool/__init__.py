@@ -19,8 +19,8 @@ __plugin_meta__ = PluginMetadata(
     name="米游社小助手插件\n",
     description="米游社工具-每日米游币任务、游戏签到、商品兑换、免抓包登录\n",
     type="application",
-    homepage="https://github.com/Ljzd-PRO/nonebot-plugin-mystool",
-    supported_adapters={"~onebot.v11", "~qq"},
+    homepage="https://github.com/Shu-Ying/zhenxun-plugin-mystool",
+    supported_adapters={"~onebot.v11"},
     usage=
     f"\n🔐 {_command_begin}登录 ➢ 登录绑定米游社账户"
     f"\n📦 {_command_begin}地址 ➢ 设置收货地址ID"
@@ -35,7 +35,6 @@ __plugin_meta__ = PluginMetadata(
     f"\n🔔 {_command_begin}通知设置 ➢ 设置是否开启每日米游币任务、游戏签到的结果通知"
     f"\n🖨️ {_command_begin}导出Cookies ➢ 导出绑定的米游社账号的Cookies数据"
     f"\n🖇️ {_command_begin}用户绑定 ➢ 绑定关联其他聊天平台或其他账号的用户数据"
-    f"\n📨 {_command_begin}私信响应 ➢ 让机器人发送一条私信给你，主要用于QQ频道"
     f"\n📖 {_command_begin}帮助 ➢ 查看帮助信息"
     f"\n🔍 {_command_begin}帮助 <功能名> ➢ 查看目标功能详细说明"
     "\n\n⚠️你的数据将经过机器人服务器，请确定你信任服务器所有者再使用。",
@@ -47,7 +46,7 @@ __plugin_meta__ = PluginMetadata(
                   for name in ("登录", "地址", "签到", "任务", "兑换", "商品",
                                "原神便笺", "铁道便笺", "设置", "账号设置",
                                "通知设置", "导出Cookies", "用户绑定",
-                               "私信响应", "帮助")],
+                               "帮助")],
         configs=zhenxun_configs,
     ).to_dict()
 )

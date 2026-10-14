@@ -51,7 +51,7 @@ async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State)
     user_account = user.accounts if user else None
     if not user_account:
         await account_setting.finish(
-            f"⚠️你尚未绑定米游社账户，请先使用『{plugin_config.preference.command_start}登录』进行登录")
+            f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录")
     if len(user_account) == 1:
         uid = next(iter(user_account.values())).bbs_uid
         state["bbs_uid"] = uid

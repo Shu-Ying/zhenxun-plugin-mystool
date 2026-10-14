@@ -1,3 +1,3 @@
 from nonebot import require
 
-require("nonebot_plugin_mystool")
+require("zhenxun_plugin_mystool")

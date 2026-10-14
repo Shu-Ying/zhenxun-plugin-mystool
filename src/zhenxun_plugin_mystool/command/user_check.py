@@ -2,34 +2,17 @@ import asyncio
 from typing import Union
 from uuid import uuid4
 
-from nonebot import get_driver, on_request, on_command, Bot
+from nonebot import on_request, on_command
 from nonebot.adapters.onebot.v11 import FriendRequestEvent, GroupRequestEvent, RequestEvent, Bot as OneBotV11Bot
-from nonebot.adapters.qq import Bot as QQGuildBot, DirectMessageCreateEvent, MessageCreateEvent
-from nonebot.adapters.qq.exception import ActionFailed as QQGuildActionFailed, AuditException
 from nonebot.internal.matcher import Matcher
 from nonebot.params import CommandArg, Command
 
 from ..command.common import CommandRegistry
 from ..model import PluginDataManager, plugin_config, uuid4_validate, CommandUsage
 from ..utils import logger, GeneralMessageEvent, COMMAND_BEGIN, get_last_command_sep, \
-    GeneralGroupMessageEvent, PLUGIN, \
-    send_private_msg
+    GeneralGroupMessageEvent
 
-__all__ = ["friendRequest", "user_binding", "direct_msg_respond"]
-_driver = get_driver()
-
-
-@_driver.on_bot_connect
-def check_qq_config(bot: QQGuildBot):
-    """
-    检查QQGuild适配器是否开启了私信功能 Intents.direct_message
-
-    :param bot: QQGuild的Bot对象
-    """
-    if isinstance(bot, QQGuildBot):
-        if not bot.bot_info.intent.direct_message:
-            logger.warning(
-                f'{plugin_config.preference.log_head}QQGuild适配器未开启私信功能 Intents.direct_message，将无法响应私信消息')
+__all__ = ["friendRequest", "user_binding"]
 
 
 friendRequest = on_request(priority=1, block=True)
@@ -37,7 +20,6 @@ friendRequest = on_request(priority=1, block=True)
 
 @friendRequest.handle()
 async def _(bot: OneBotV11Bot, event: RequestEvent):
-    command_start = list(get_driver().config.command_start)[0]
     # 判断为加好友事件
     if isinstance(event, FriendRequestEvent):
         if plugin_config.preference.add_friend_accept:
@@ -47,7 +29,7 @@ async def _(bot: OneBotV11Bot, event: RequestEvent):
                 # 等待腾讯服务器响应
                 await asyncio.sleep(1.5)
                 await bot.send_private_msg(user_id=event.user_id,
-                                           message=f'欢迎使用米游社小助手，请发送『{command_start}帮助』查看更多用法哦~')
+                                           message=f'欢迎使用米游社小助手，请发送『{COMMAND_BEGIN}帮助』查看更多用法哦~')
     # 判断为邀请进群事件
     elif isinstance(event, GroupRequestEvent):
         logger.info(f'{plugin_config.preference.log_head}已加入群聊 {event.group_id}')
@@ -187,64 +169,8 @@ async def _(
                 await matcher.finish("⚠️找不到此UUID密钥对应的用户数据")
             PluginDataManager.plugin_data.do_user_bind(user_id, target_id)
             user = PluginDataManager.plugin_data.users[user_id]
-            if isinstance(event, DirectMessageCreateEvent):
-                user.qq_guild[user_id] = event.channel_id
-            elif isinstance(event, MessageCreateEvent):
-                user.qq_guild[user_id] = event.guild_id
             if isinstance(event, GeneralGroupMessageEvent):
                 user.uuid = str(uuid4())
                 await matcher.send("🔑由于您在群聊中进行绑定，已刷新您的UUID密钥，但不会影响其他已绑定用户")
             PluginDataManager.write_plugin_data()
             await matcher.send(f"✔已绑定用户 {target_id} 的用户数据")
-
-
-direct_msg_respond = on_command(
-    f"{plugin_config.preference.command_start}私信响应",
-    aliases={
-        f"{plugin_config.preference.command_start}私聊响应",
-        f"{plugin_config.preference.command_start}请求响应"
-    },
-    priority=5,
-    block=True
-)
-
-CommandRegistry.set_usage(
-    direct_msg_respond,
-    CommandUsage(
-        name="私信响应",
-        description="让机器人私信发送给您一条消息，防止因为发送了三条私信消息而机器人未回复导致无法继续私信。"
-    )
-)
-
-
-@direct_msg_respond.handle()
-async def _(bot: Bot, event: Union[GeneralGroupMessageEvent]):
-    # 附加功能：记录用户所在频道
-    if isinstance(event, MessageCreateEvent):
-        user_id = event.get_user_id()
-        if user := PluginDataManager.plugin_data.users.get(user_id):
-            user.qq_guild[user_id] = event.guild_id
-            PluginDataManager.write_plugin_data()
-
-    msg_text = f"{PLUGIN.metadata.name}" \
-               f"{PLUGIN.metadata.description}\n" \
-               "具体用法：\n" \
-               f"{PLUGIN.metadata.usage.format(HEAD=COMMAND_BEGIN)}"
-    send_result, action_failed = await send_private_msg(
-        user_id=event.get_user_id(),
-        message=msg_text,
-        guild_id=event.guild_id if isinstance(event, MessageCreateEvent) else None,
-        use=bot
-    )
-    if send_result:
-        await direct_msg_respond.send("✔已发送私信，请查看私信消息")
-    else:
-        if isinstance(action_failed, QQGuildActionFailed):
-            if action_failed.code == 304049:
-                await direct_msg_respond.finish(
-                    f"⚠️发送私信失败，达到了机器人每日主动私信次数限制。错误信息：{action_failed!r}")
-            elif action_failed.code == 304022:
-                await direct_msg_respond.finish(f"⚠️发送私信失败，请换一个时间再试。错误信息：{action_failed!r}")
-            elif isinstance(action_failed, AuditException):
-                await direct_msg_respond.finish(f"⚠️发送私信失败，消息未通过审查。错误信息：{action_failed!r}")
-        await direct_msg_respond.finish(f"⚠️发送私信失败，错误信息：{action_failed!r}")

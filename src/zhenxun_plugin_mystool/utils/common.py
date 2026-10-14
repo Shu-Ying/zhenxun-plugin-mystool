@@ -25,14 +25,12 @@ except ImportError:
 
 from nonebot import Adapter, Bot
 
-from nonebot_plugin_alconna import Target, UniMessage
+from nonebot_plugin_alconna import UniMessage
 from zhenxun.utils.message import MessageUtils
 from zhenxun.utils.platform import PlatformUtils
 
 from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, PrivateMessageEvent, GroupMessageEvent, \
-    Adapter as OneBotV11Adapter, Bot as OneBotV11Bot
-from nonebot.adapters.qq import DirectMessageCreateEvent, MessageCreateEvent, \
-    Adapter as QQGuildAdapter, Bot as QQGuildBot, MessageEvent
+    Bot as OneBotV11Bot
 from nonebot.log import logger
 from nonebot.log import logger
 from qrcode import QRCode
@@ -48,11 +46,11 @@ __all__ = ["GeneralMessageEvent", "GeneralPrivateMessageEvent", "GeneralGroupMes
 
 # 使用真寻消息模块，主动消息按调用方指定的 Bot 或 Adapter 选择目标
 
-GeneralMessageEvent = OneBotV11MessageEvent, MessageCreateEvent, DirectMessageCreateEvent, MessageEvent
+GeneralMessageEvent = (OneBotV11MessageEvent,)
 """消息事件类型"""
-GeneralPrivateMessageEvent = PrivateMessageEvent, DirectMessageCreateEvent
+GeneralPrivateMessageEvent = (PrivateMessageEvent,)
 """私聊消息事件类型"""
-GeneralGroupMessageEvent = GroupMessageEvent, MessageCreateEvent
+GeneralGroupMessageEvent = (GroupMessageEvent,)
 """群聊消息事件类型"""
 
 
@@ -353,8 +351,7 @@ def generate_qr_img(data: str):
 async def send_private_msg(
         user_id: str,
         message: Union[str, UniMessage],
-        use: Union[Bot, Adapter] = None,
-        guild_id: Union[str, int, None] = None
+        use: Union[Bot, Adapter] = None
 ) -> Tuple[bool, Optional[Exception]]:
     """
     主动发送私信消息
@@ -362,7 +359,6 @@ async def send_private_msg(
     :param user_id: 目标用户ID
     :param message: 消息内容
     :param use: 使用的Bot或Adapter，为None则使用所有Bot
-    :param guild_id: 用户所在频道ID，为None则从用户数据中获取
     :return: (是否发送成功, ActionFailed Exception)
     """
     user_id = str(user_id)
@@ -370,40 +366,22 @@ async def send_private_msg(
                 if isinstance(message, str) else message)
 
     # 整合符合条件的 Bot 对象
-    if isinstance(use, (OneBotV11Bot, QQGuildBot)):
+    if isinstance(use, Bot):
         bots = [use]
-    elif isinstance(use, (OneBotV11Adapter, QQGuildAdapter)):
+    elif isinstance(use, Adapter):
         bots = use.bots.values()
     else:
         bots = nonebot.get_bots().values()
 
     for bot in bots:
-        if not isinstance(bot, (OneBotV11Bot, QQGuildBot)):
+        if not isinstance(bot, OneBotV11Bot):
             continue
         try:
-            # 获取 PlatformTarget 对象
-            if isinstance(bot, OneBotV11Bot):
-                logger.info(
-                    f"{plugin_config.preference.log_head}向用户 {user_id} 发送 QQ 聊天私信")
-                receipt = await PlatformUtils.send_message(
-                    bot, user_id=user_id, group_id=None, message=outgoing
-                )
-            else:
-                if guild_id is None:
-                    if user := PluginDataManager.plugin_data.users.get(user_id):
-                        if not (guild_id := user.qq_guild.get(user_id)):
-                            logger.error(f"{plugin_config.preference.log_head}用户 {user_id} 数据中没有任何频道ID")
-                            return False, ValueError("用户数据中缺少来源频道ID")
-                    else:
-                        logger.error(
-                            f"{plugin_config.preference.log_head}用户数据中不存在用户 {user_id}，无法获取频道ID")
-                        return False, ValueError("用户数据不存在，无法获取来源频道ID")
-                target = Target(user_id, parent_id=str(guild_id),
-                                channel=True, private=True)
-                logger.info(f"{plugin_config.preference.log_head}向用户 {user_id} 发送 QQ 频道私信"
-                            f" recipient_id: {user_id}, source_guild_id: {guild_id}")
-                receipt = await outgoing.send(target=target, bot=bot,
-                                              fallback=False)
+            logger.info(
+                f"{plugin_config.preference.log_head}向用户 {user_id} 发送 QQ 聊天私信")
+            receipt = await PlatformUtils.send_message(
+                bot, user_id=user_id, group_id=None, message=outgoing
+            )
             if receipt is None:
                 raise RuntimeError("消息发送未返回回执")
         except Exception as e:

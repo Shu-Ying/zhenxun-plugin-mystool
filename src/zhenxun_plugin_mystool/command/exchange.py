@@ -13,7 +13,6 @@ from typing import List, Callable, Any, Tuple, Optional, Dict, Union
 from apscheduler.events import JobExecutionEvent, EVENT_JOB_EXECUTED
 from nonebot import on_command, get_driver
 from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, MessageSegment as OneBotV11MessageSegment
-from nonebot.adapters.qq import MessageEvent as QQGuildMessageEvent, MessageSegment as QQGuildMessageSegment
 from nonebot.internal.params import ArgStr
 from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, T_State, CommandArg, Command
@@ -355,8 +354,6 @@ async def _(event: Union[GeneralMessageEvent], arg=ArgPlainText("content")):
         msg = None
         if isinstance(event, OneBotV11MessageEvent):
             msg = OneBotV11MessageSegment.image(image_bytes)
-        elif isinstance(event, QQGuildMessageEvent):
-            msg = QQGuildMessageSegment.file_image(image_bytes)
         await get_good_image.finish(msg)
     else:
         await get_good_image.finish(

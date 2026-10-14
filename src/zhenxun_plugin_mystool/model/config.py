@@ -54,7 +54,7 @@ class Preference(BaseModel):
     """日志保存路径"""
     log_rotation: Union[str, int, time, timedelta] = "1 week"
     '''日志保留时长(需要按照格式设置)'''
-    plugin_name: str = "nonebot_plugin_mystool"
+    plugin_name: str = "zhenxun_plugin_mystool"
     '''插件名(为模块名字，或于plugins目录手动加载时的目录名)'''
     encoding: str = "utf-8"
     '''文件读写编码'''

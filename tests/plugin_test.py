@@ -288,7 +288,7 @@ class PluginTest:
 async def main():
     # 测试插件
     test = PluginTest(
-        "nonebot_plugin_mystool"
+        "zhenxun_plugin_mystool"
     )
     return await test.run()
 

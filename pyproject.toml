@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "nonebot-plugin-mystool"
+name = "zhenxun-plugin-mystool"
 version = "v2.10.1"
 description = "真寻机器人米游社插件 | 每日米游币任务、游戏签到、商品兑换、免抓包登录、原神崩铁便笺提醒"
 license = "MIT"
@@ -8,10 +8,10 @@ authors = [
   "Everything0519 <598139245@qq.com>"
 ]
 readme = "README.md"
-homepage = "https://github.com/Ljzd-PRO/nonebot-plugin-mystool"
-repository = "https://github.com/Ljzd-PRO/nonebot-plugin-mystool"
-documentation = "https://github.com/Ljzd-PRO/nonebot-plugin-mystool/wiki"
-keywords = ["bot", "qq", "qqbot", "onebotv11", "onebot", "nonebot2", "nonebot", "mihoyo", "mihoyobbs", "qq-guild", "star-rail", "genshin-impact"]
+homepage = "https://github.com/Shu-Ying/zhenxun-plugin-mystool"
+repository = "https://github.com/Shu-Ying/zhenxun-plugin-mystool"
+documentation = "https://github.com/Shu-Ying/zhenxun-plugin-mystool#readme"
+keywords = ["bot", "qq", "qqbot", "onebotv11", "onebot", "nonebot2", "nonebot", "mihoyo", "mihoyobbs", "star-rail", "genshin-impact"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -19,7 +19,7 @@ classifiers = [
     "Development Status :: 5 - Production/Stable"
 ]
 packages = [
-    { include = "nonebot_plugin_mystool", from = "src" },
+    { include = "zhenxun_plugin_mystool", from = "src" },
 ]
 
 [tool.poetry.dependencies]
@@ -31,7 +31,6 @@ ntplib = "^0.4.0"
 Pillow = ">=9.5,<12.0"
 requests = "^2.31.0"
 nonebot-adapter-onebot = "^2.3.1"
-nonebot-adapter-qq = "^1.1.2"
 tenacity = ">=8.2.3,<10.0.0"
 qrcode = ">=7.4.2,<9.0.0"
 pydantic = ">=2.0,<3.0"
@@ -46,7 +45,7 @@ pytest = ">=8,<9"
 optional = true
 
 [tool.poetry.urls]
-"Bug Tracker" = "https://github.com/Ljzd-PRO/nonebot-plugin-mystool/issues"
+"Bug Tracker" = "https://github.com/Shu-Ying/zhenxun-plugin-mystool/issues"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

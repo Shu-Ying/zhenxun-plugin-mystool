@@ -6,9 +6,6 @@ from nonebot import on_command, get_adapters, get_bot
 from nonebot.adapters.onebot.v11 import MessageSegment as OneBotV11MessageSegment, Adapter as OneBotV11Adapter, \
     MessageEvent as OneBotV11MessageEvent, GroupMessageEvent as OneBotV11GroupMessageEvent, \
     Bot
-from nonebot.adapters.qq import MessageSegment as QQGuildMessageSegment, Adapter as QQGuildAdapter, \
-    MessageEvent as QQGuildMessageEvent
-from nonebot.adapters.qq.exception import AuditException
 from nonebot.exception import ActionFailed
 from nonebot.internal.matcher import Matcher
 from nonebot.params import CommandArg
@@ -312,7 +309,7 @@ async def perform_game_sign(
 
             # 用户打开通知或手动签到时，进行通知
             if user.enable_notice or matcher:
-                onebot_img_msg, notice_image, qq_guild_img_msg = "", None, ""
+                onebot_img_msg, notice_image = "", None
                 get_info_status, info = await signer.get_info(account.platform)
                 get_award_status, awards = await signer.get_rewards()
                 if not get_info_status or not get_award_status:
@@ -332,7 +329,6 @@ async def perform_game_sign(
                         if img_file:
                             onebot_img_msg = OneBotV11MessageSegment.image(img_file)
                             notice_image = img_file
-                            qq_guild_img_msg = QQGuildMessageSegment.file_image(img_file)
                         else:
                             logger.warning(f"{plugin_config.preference.log_head}签到奖励图片下载失败，仅发送文字结果")
                     else:
@@ -342,17 +338,14 @@ async def perform_game_sign(
                     try:
                         if isinstance(event, OneBotV11MessageEvent):
                             msgs_list.append(msg + onebot_img_msg)
-                        elif isinstance(event, QQGuildMessageEvent):
-                            await matcher.send(msg)
-                            await matcher.send(qq_guild_img_msg)
-                    except (ActionFailed, AuditException):
+                    except ActionFailed:
                         pass
                 else:
                     notification = MessageUtils.build_message(
                         [msg, notice_image] if notice_image else msg
                     )
                     for adapter in get_adapters().values():
-                        if isinstance(adapter, (OneBotV11Adapter, QQGuildAdapter)):
+                        if isinstance(adapter, OneBotV11Adapter):
                             for user_id in user_ids:
                                 await send_private_msg(use=adapter, user_id=user_id,
                                                        message=notification)

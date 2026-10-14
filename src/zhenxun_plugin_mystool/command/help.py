@@ -1,14 +1,13 @@
 from typing import Union
 
 from nonebot import on_command
-from nonebot.adapters.qq.exception import ActionFailed as QQGuildActionFailed
 from nonebot.internal.params import ArgStr
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
 from ..command.common import CommandRegistry
 from ..model import plugin_config, CommandUsage
-from ..utils.common import PLUGIN, COMMAND_BEGIN, GeneralMessageEvent, logger, get_last_command_sep
+from ..utils.common import PLUGIN, COMMAND_BEGIN, GeneralMessageEvent, get_last_command_sep
 
 __all__ = ["helper"]
 
@@ -40,16 +39,12 @@ async def _(_: Union[GeneralMessageEvent], matcher: Matcher, args=CommandArg()):
         matcher.set_arg("content", args)
     # 只有主命令“帮助”
     else:
-        try:
-            await matcher.finish(
-                f"{PLUGIN.metadata.name}"
-                f"{PLUGIN.metadata.description}\n"
-                "具体用法：\n"
-                f"{PLUGIN.metadata.usage.format(HEAD=COMMAND_BEGIN)}"
-            )
-        except QQGuildActionFailed as e:
-            if e.code == 304003:
-                logger.exception(f"{plugin_config.preference.log_head}帮助命令的文本发送失败，原因是频道禁止发送URL")
+        await matcher.finish(
+            f"{PLUGIN.metadata.name}"
+            f"{PLUGIN.metadata.description}\n"
+            "具体用法：\n"
+            f"{PLUGIN.metadata.usage.format(HEAD=COMMAND_BEGIN)}"
+        )
 
 
 @helper.got('content')

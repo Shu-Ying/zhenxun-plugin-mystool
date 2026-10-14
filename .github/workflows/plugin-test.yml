@@ -16,19 +16,21 @@ on:
     paths:
       - ".github/actions/setup-python/**"
       - ".github/workflows/plugin-test.yml"
-      - "src/nonebot_plugin_mystool/**"
+      - "src/zhenxun_plugin_mystool/**"
       - "tests/**"
       - "pyproject.toml"
       - "poetry.lock"
+      - "requirements.txt"
   pull_request:
     branches: [ "stable", "dev" ]
     paths:
       - ".github/actions/setup-python/**"
       - ".github/workflows/plugin-test.yml"
-      - "src/nonebot_plugin_mystool/**"
+      - "src/zhenxun_plugin_mystool/**"
       - "tests/**"
       - "pyproject.toml"
       - "poetry.lock"
+      - "requirements.txt"
 
 jobs:
   plugin_test:

@@ -3,10 +3,13 @@
 ## Runtime and messaging
 
 Mystool loads as a zhenxun external plugin and uses the framework's plugin
-metadata, message construction and sending facilities. SAA is not required.
+metadata, message construction and sending facilities. SAA and the QQ official
+adapter are not required or imported. Only OneBot V11 is supported.
 Interactive replies and scheduled private notifications retain their content.
-Images may be constructed from downloaded bytes. Bot/adapter selection and QQ
-guild source context remain explicit. Failed or unavailable delivery must not
+Images may be constructed from downloaded bytes. OneBot bot/adapter selection
+remains explicit. QQ official event types, image factories, guild targets,
+connection hooks, private-response commands and exception handling are removed.
+Failed or unavailable delivery must not
 be reported as successful. The existing return contract is preserved at callers.
 
 ## Commands
@@ -32,6 +35,8 @@ exchange plans remain readable at their existing data paths. Operational
 configuration is resolved before command registration and schedule creation.
 Device/salt environment overrides and user-specific configuration keep their
 existing roles. Changes to startup-bound settings require a restart.
+Legacy qq_guild data remains readable solely for compatibility and is no longer
+read or updated by command or notification logic.
 
 ## Scheduling and compatibility
 
@@ -46,3 +51,9 @@ Focused checks cover plugin loading, metadata, text/image sending, failure
 handling, command routing and configuration/data compatibility. Documentation
 describes external-plugin installation and any user-visible migration changes.
 Mocked delivery and actual connected-bot delivery are reported separately.
+The plugin repository requirements.txt supplies qrcode>=7.4.2,<9.0.0 and
+ntplib>=0.4.0,<0.5.0 for installation into the host's actual virtual environment.
+pyproject.toml keeps those direct dependencies for package installation and
+removes nonebot-adapter-qq; the regenerated lock follows these declarations.
+Checks reject QQ official imports and exercise loading when the adapter cannot
+be imported, while retaining OneBot text/image and send-failure coverage.

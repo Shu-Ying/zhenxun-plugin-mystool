@@ -10,7 +10,7 @@ on:
     paths:
       - ".github/actions/setup-python/**"
       - ".github/workflows/python-package.yml"
-      - "src/nonebot_plugin_mystool/**"
+      - "src/zhenxun_plugin_mystool/**"
       - "pyproject.toml"
       - "poetry.lock"
   pull_request:
@@ -18,7 +18,7 @@ on:
     paths:
       - ".github/actions/setup-python/**"
       - ".github/workflows/python-package.yml"
-      - "src/nonebot_plugin_mystool/**"
+      - "src/zhenxun_plugin_mystool/**"
       - "pyproject.toml"
       - "poetry.lock"
 

@@ -4,9 +4,6 @@ from typing import Union
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, MessageSegment as OneBotV11MessageSegment
-from nonebot.adapters.qq import MessageSegment as QQGuildMessageSegment, DirectMessageCreateEvent, \
-    MessageEvent as QQGuildMessageEvent
-from nonebot.adapters.qq.exception import AuditException
 from nonebot.exception import ActionFailed
 from nonebot.internal.matcher import Matcher
 from nonebot.internal.params import ArgStr
@@ -48,10 +45,6 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
         user_id = event.get_user_id()
         PluginDataManager.plugin_data.users.setdefault(user_id, UserData())
         user = PluginDataManager.plugin_data.users[user_id]
-        # 如果是QQ频道，需要记录频道ID
-        if isinstance(event, DirectMessageCreateEvent):
-            user.qq_guild[user_id] = event.channel_id
-
         # 1. 获取 GameToken 登录二维码
         device_id = generate_device_id()
         login_status, fetch_qrcode_ret = await fetch_game_token_qrcode(
@@ -64,16 +57,13 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
             image_bytes = generate_qr_img(qrcode_url)
             if isinstance(event, OneBotV11MessageEvent):
                 msg_img = OneBotV11MessageSegment.image(image_bytes)
-            elif isinstance(event, QQGuildMessageEvent):
-                msg_img = QQGuildMessageSegment.file_image(image_bytes)
             else:
                 await get_cookie.finish("⚠️发送二维码失败，无法登录")
             try:
                 await get_cookie.send(msg_img)
-            except (ActionFailed, AuditException) as e:
-                if isinstance(e, ActionFailed):
-                    logger.exception("发送包含二维码的登录消息失败")
-                    await get_cookie.finish("⚠️发送二维码失败，无法登录")
+            except ActionFailed:
+                logger.exception("发送包含二维码的登录消息失败")
+                await get_cookie.finish("⚠️发送二维码失败，无法登录")
 
             # 2. 从二维码登录获取 GameToken
             qrcode_query_times = round(
