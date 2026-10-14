@@ -1,71 +1,10 @@
 import asyncio
-import importlib
-from importlib.abc import MetaPathFinder
-import json
-import os
-from pathlib import Path
-import shutil
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nonebot
 import pytest
-
-
-class BlockQQAdapter(MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "nonebot.adapters.qq" or fullname.startswith(
-            "nonebot.adapters.qq."
-        ):
-            raise ModuleNotFoundError(
-                "QQ official adapter is unavailable", name=fullname
-            )
-
-
-def config_manager(directory):
-    from zhenxun.configs.utils import ConfigsManager
-
-    with patch("zhenxun.configs.utils.DATA_PATH", directory):
-        return ConfigsManager(directory / "registered.yaml")
-
-
-@pytest.fixture(scope="module")
-def runtime(tmp_path_factory):
-    root = Path(__file__).resolve().parents[1]
-    host = Path(os.environ.get("ZHENXUN_ROOT", root.parent / "zhenxun_bot"))
-    assert (host / "zhenxun").is_dir(), "请设置 ZHENXUN_ROOT 为真寻源码目录"
-    workspace = tmp_path_factory.mktemp("mystool-host")
-    shutil.copytree(
-        host / "zhenxun",
-        workspace / "zhenxun",
-        ignore=shutil.ignore_patterns("__pycache__"),
-    )
-    original = Path.cwd()
-    blocker = BlockQQAdapter()
-    sys.meta_path.insert(0, blocker)
-    sys.path[:0] = [str(workspace), str(root / "src")]
-    os.chdir(workspace)
-    nonebot.init(
-        driver="~fastapi+~httpx+~websockets",
-        command_start={""},
-        db_url="sqlite:data/zhenxun.db",
-        superusers=set(),
-    )
-    from nonebot.adapters.onebot.v11 import Adapter
-
-    driver = nonebot.get_driver()
-    driver.register_adapter(Adapter)
-    importlib.import_module("zhenxun.services")
-    loaders = workspace / "external_plugins"
-    loaders.mkdir()
-    shutil.copyfile(root / "zhenxun_loader.py", loaders / "mystool_loader.py")
-    nonebot.load_plugins(str(loaders))
-    plugin = nonebot.get_plugin("zhenxun_plugin_mystool")
-    assert plugin is not None
-    yield SimpleNamespace(plugin=plugin, workspace=workspace, driver=driver)
-    sys.meta_path.remove(blocker)
-    os.chdir(original)
 
 
 def test_loading_and_metadata(runtime):
@@ -87,7 +26,7 @@ def test_loading_and_metadata(runtime):
     assert plugin_config.preference.command_start == "米游社"
     from zhenxun_plugin_mystool.model.common import data_path
 
-    assert data_path == runtime.workspace / "data" / "nonebot-plugin-mystool"
+    assert data_path.resolve() == runtime.workspace / "data" / "zhenxun_plugin_mystool"
 
 
 def test_prefixed_command_rules_leave_host_commands_available(runtime):
@@ -115,57 +54,6 @@ def test_prefixed_command_rules_leave_host_commands_available(runtime):
         asyncio.run(rule(cmd=("米游社签到",), cmd_arg=None, cmd_whitespace=None))
         for rule in rules
     )
-
-
-@pytest.mark.parametrize("custom_prefix", ["", "mys"])
-def test_configuration_precedence_and_persistence(runtime, tmp_path, custom_prefix):
-    from zhenxun_plugin_mystool.model.config import PluginConfig
-    from zhenxun_plugin_mystool.model import zhenxun_config
-
-    old = tmp_path / "configV2.json"
-    old.write_text(
-        json.dumps(
-            {
-                "preference": {
-                    "timeout": 17,
-                    "plan_time": "03:45",
-                    "command_start": "old",
-                },
-                "good_list_image_config": {"WIDTH": 1234},
-            }
-        ),
-        encoding="utf-8",
-    )
-    original = old.read_bytes()
-    manager = config_manager(tmp_path)
-    manager.add_plugin_config(
-        "mystool", "PREFERENCE", {"timeout": 29, "command_start": custom_prefix}
-    )
-    with patch.object(zhenxun_config, "Config", manager):
-        config, registrations = zhenxun_config.load_config(PluginConfig, old)
-        assert config.preference.timeout == 29
-        assert config.preference.plan_time == "03:45"
-        assert config.good_list_image_config.WIDTH == 1234
-        assert config.preference.command_start == (custom_prefix or "米游社")
-        assert len(registrations) == 2
-        assert old.read_bytes() == original
-        old.write_text('{"preference": {"timeout": 99}}', encoding="utf-8")
-        reloaded = config_manager(tmp_path)
-        with patch.object(zhenxun_config, "Config", reloaded):
-            config, _ = zhenxun_config.load_config(PluginConfig, old)
-            assert config.preference.timeout == 29
-
-
-def test_invalid_configuration_does_not_persist(runtime, tmp_path):
-    from zhenxun_plugin_mystool.model.config import PluginConfig
-    from zhenxun_plugin_mystool.model import zhenxun_config
-
-    manager = config_manager(tmp_path)
-    manager.add_plugin_config("mystool", "PREFERENCE", {"timeout": "bad"})
-    with patch.object(zhenxun_config, "Config", manager):
-        with pytest.raises(ValueError):
-            zhenxun_config.load_config(PluginConfig, tmp_path / "absent.json")
-    assert not (tmp_path / "registered.yaml").exists()
 
 
 def test_private_message_text_image_and_failure(runtime):
@@ -239,7 +127,6 @@ def test_account_data_and_scheduler_contract(runtime):
     user = UserData(
         accounts={"123": account},
         enable_notice=False,
-        qq_guild={"user": 456},
         exchange_plans=[plan],
     )
     data = PluginData(users={"user": user}, user_bind={"other": "user"})
@@ -247,7 +134,6 @@ def test_account_data_and_scheduler_contract(runtime):
     assert restored.user_bind == data.user_bind
     assert restored.users["user"].enable_notice is False
     assert restored.users["user"].accounts["123"].cookies.bbs_uid == "123"
-    assert restored.users["user"].qq_guild == {"user": 456}
     assert (
         next(iter(restored.users["user"].exchange_plans)).good.goods_id == "test-good"
     )
@@ -260,25 +146,6 @@ def test_account_data_and_scheduler_contract(runtime):
     assert scheduler.get_job("resin_check") is not None
 
 
-def test_yaml_configuration_and_legacy_prefix(runtime, tmp_path):
-    from zhenxun_plugin_mystool.model.config import PluginConfig
-    from zhenxun_plugin_mystool.model import zhenxun_config
-
-    old = tmp_path / "configV2.json"
-    old.write_text(
-        '{"preference": {"timeout": 17, "command_start": "legacy"}}', encoding="utf-8"
-    )
-    (tmp_path / "config.yaml").write_text(
-        "mystool:\n  PREFERENCE:\n    timeout: 31\n", encoding="utf-8"
-    )
-    manager = config_manager(tmp_path)
-    with patch.object(zhenxun_config, "Config", manager):
-        config, _ = zhenxun_config.load_config(PluginConfig, old)
-    assert config.preference.timeout == 31
-    assert config.preference.command_start == "legacy"
-    assert manager.get_config("mystool", "PREFERENCE")["timeout"] == 31
-
-
 def test_framework_configuration_and_plugin_registration(runtime):
     from zhenxun_plugin_mystool.model.config import plugin_config
     from zhenxun.builtin_plugins.init import init_config, init_plugin
@@ -286,11 +153,11 @@ def test_framework_configuration_and_plugin_registration(runtime):
 
     registered = []
     init_config._handle_config(runtime.plugin, registered)
-    assert "mystool:preference" in registered
+    assert "zhenxun_plugin_mystool:命令前缀" in registered
     init_config._generate_simple_config(registered)
     Config.reload()
     assert (runtime.workspace / "data/config.yaml").is_file()
-    assert Config.get_config("mystool", "PREFERENCE")["command_start"] == "米游社"
+    assert Config.get_config("zhenxun_plugin_mystool", "命令前缀") == "米游社"
     plugins, limits = [], []
     asyncio.run(init_plugin._handle_setting(runtime.plugin, plugins, limits))
     assert plugins[0].module == "zhenxun_plugin_mystool"
@@ -386,49 +253,6 @@ def test_private_send_failure_is_written_to_plugin_log(runtime, tmp_path):
     finally:
         for sink_id in sink_ids:
             common.logger.remove(sink_id)
-
-
-def test_sparse_yaml_migration_survives_host_generation(runtime, tmp_path):
-    from zhenxun_plugin_mystool.model.config import PluginConfig
-    from zhenxun_plugin_mystool.model import zhenxun_config
-    from zhenxun.builtin_plugins.init import init_config
-
-    old = tmp_path / "configV2.json"
-    old.write_text(json.dumps({"preference": {"plan_time": "03:45"}}), encoding="utf-8")
-    original = old.read_bytes()
-    simple = tmp_path / "config.yaml"
-    simple.write_text("mystool:\n  PREFERENCE:\n    timeout: 31\n", encoding="utf-8")
-    manager = config_manager(tmp_path)
-    with patch.object(zhenxun_config, "Config", manager):
-        initial, registrations = zhenxun_config.load_config(PluginConfig, old)
-        assert initial.preference.plan_time == "03:45"
-        assert initial.preference.timeout == 31
-        with (
-            patch.object(init_config, "Config", manager),
-            patch.object(init_config, "SIMPLE_CONFIG_FILE", simple),
-            patch.object(init_config, "DATA_PATH", tmp_path),
-        ):
-            init_config._generate_simple_config(
-                [
-                    "mystool:" + registration.key.lower()
-                    for registration in registrations
-                ]
-            )
-        manager.reload()
-        assert old.read_bytes() == original
-        old.write_text(
-            json.dumps({"preference": {"plan_time": "09:12"}}), encoding="utf-8"
-        )
-        reloaded = config_manager(tmp_path)
-        with patch.object(zhenxun_config, "Config", reloaded):
-            restored, _ = zhenxun_config.load_config(PluginConfig, old)
-        assert restored.preference.plan_time == "03:45"
-        assert restored.preference.timeout == 31
-        old.unlink()
-        without_legacy = config_manager(tmp_path)
-        with patch.object(zhenxun_config, "Config", without_legacy):
-            restored, _ = zhenxun_config.load_config(PluginConfig, old)
-        assert restored.preference.plan_time == "03:45"
 
 
 @pytest.mark.parametrize("prefix", ["米游社", "/custom"])

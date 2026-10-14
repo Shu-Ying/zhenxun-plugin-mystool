@@ -15,12 +15,28 @@ zhenxun message construction and sending, and integrate plugin management.
   requirements.txt, consistent with pyproject.toml, with installation guidance.
 - Register zhenxun plugin metadata, help commands and management settings.
 - Use a configurable non-empty command prefix, defaulting to 米游社.
-- Register operational preferences and image-generation settings in zhenxun
-  data/config.yaml under mystool, with legacy configV2.json migration fallback.
+- Register each adjustable preference and image setting individually with
+  RegisterConfig(key, value, help, default_value) inside PluginExtraData.configs.
+  Use the plugin's own zhenxun configuration module, meaningful individual keys,
+  correct value types and validation; remove the two grouped dictionaries.
+- Store all business data in zhenxun's existing database through its Model base
+  and transaction facility: users, accounts, cookies, bindings, exchange plans,
+  notification switches and reminder settings. No separate database connection.
+- Replace synchronous JSON writes at every command, task and exchange callback
+  with awaited transactional repository operations. Database commit failure must
+  roll back related changes, including cached state; concurrent updates must not
+  overwrite unrelated users or leave dangling bindings/plans.
+- Initialize storage after zhenxun database startup and before scheduled jobs
+  consume data. Restore active plans from database on restart.
+- Treat this unreleased version as a fresh schema: remove legacy JSON paths,
+  readers/writers, startup upgrade modules and compatibility-only guild fields.
+- User access lists are runtime configuration, managed by individual zhenxun
+  config entries instead of separate blacklist/whitelist/admin text files.
 - Check compatibility with the actual local NoneBot/Pydantic environment.
-- Preserve account data, cookies, user bindings, exchange plans and notification
-  preferences; retain the existing task scheduling semantics.
-- Update installation/migration documentation and add focused integration checks.
+- Retain business behavior, command prefixes, OneBot messaging and scheduling
+  semantics. Add isolated real-database checks without live account actions.
+- Never edit, rewrite or regenerate the user's README, including during review
+  or delivery. Use code/config help and formal change documents for explanations.
 
 Repository paths and README files are implementation references, not independent
 requirements documents. No change to zhenxun core is currently proposed.
@@ -28,7 +44,8 @@ requirements documents. No change to zhenxun core is currently proposed.
 # Non-goals
 
 - Rewrite MiHoYo APIs, login flows, exchange logic or the entire command system.
-- Convert account data to the zhenxun ORM or redesign task scheduling.
+- Import, back up, migrate or support old JSON data or old grouped config values.
+- Redesign MiHoYo APIs, task scheduling, or the host's database/config framework.
 - Publish releases, push changes, or perform real login/sign-in/exchange actions.
 
 # Acceptance examples
@@ -41,21 +58,31 @@ requirements documents. No change to zhenxun core is currently proposed.
    delivery failure without claiming success.
 - Commands use the configured non-empty prefix (default 米游社); help examples
    match the registered commands, and unprefixed zhenxun commands remain usable.
-- Explicit zhenxun configuration takes precedence over legacy configV2.json;
-   absent fields migrate from legacy configuration, then use defaults. Existing
-   account data, cookies, bindings and exchange plans remain readable.
+- Each configurable setting is separately registered through PluginExtraData
+   RegisterConfig entries and round-trips through the host config generation and
+   reload with its correct type, help and default. No old grouped dictionaries,
+   configV2.json or access-list text files are read or written.
+- Users, accounts, cookies, bindings, exchange plans and per-user settings are
+   durably stored in the host database. Fresh initialization and restart restore
+   data; transaction failures roll back and concurrency preserves independent
+   updates. No business JSON files are created or used.
 - Scheduled sign-in, coin tasks and note reminders retain their timing and
    notification switches; focused checks do not contact production accounts.
-- Documentation explains installation, command/configuration changes and
-   verification limits; dependencies permit the target environment. QQ official
+- The user's README remains byte-for-byte unchanged. Code/configuration help and
+   formal change documents explain storage/config behavior and verification
+   limits; dependencies permit the target environment. QQ official
    support and its commands are absent from runtime, metadata and dependency
    declarations. requirements.txt installs qrcode and ntplib in the host venv.
 
 # Constraints and invariants
 
 - Use minimal changes and preserve unrelated source and existing comments.
-- Preserve legacy stored qq_guild fields only for data-format compatibility;
-  no active behavior reads or updates them. Do not delete existing account data.
+- No production database, Bot or account operations during implementation or
+  verification; tests use isolated temporary databases and mocked network calls.
+- Database transactions do not enclose network requests or waiting for user input.
+- Use the host's registered ORM models, connection and lifecycle; no fire-and-
+  forget writes that report success before commit.
+- Preserve the user's rewritten README without any modifications.
 - Actual delivery needs a connected test bot and is separate from mocked checks.
 
 # Decisions
@@ -64,14 +91,16 @@ requirements documents. No change to zhenxun core is currently proposed.
   official guild support: remove that support completely and retain OneBot V11.
 - requirements.txt belongs to zhenxun-plugin-mystool; do not change zhenxun core
   or install/uninstall dependencies in the production environment.
+- The user states this is unreleased and explicitly rejects old-data migration.
+- The user selected business data in database and runtime settings managed by
+  zhenxun configuration, and supplied individual RegisterConfig entries as the
+  required registration format. These supersede the earlier JSON/group migration
+  and legacy-field compatibility decisions.
 - Q1: User selected A. Use a dedicated configurable command prefix. The default
   is 米游社; retain an existing non-empty custom prefix. Empty prefixes resolve
-  to 米游社, including migration from the legacy empty default.
-- Q2: User selected A. Operational preferences and image-generation settings
-  are managed by zhenxun configuration; configV2.json is a legacy migration
-  source. Account data keeps its original format and path.
-- Priority is explicit zhenxun value, then legacy value for missing fields,
-  then plugin default. Migration does not overwrite existing zhenxun values.
+  to 米游社.
+- Operational preferences and image settings use individual zhenxun entries;
+  explicit host values take precedence over plugin defaults, without legacy input.
 - Settings affecting command registration and scheduled timings take effect
   after restart. Live re-registration/rescheduling is outside this change.
 - Device/salt environment overrides and user-specific settings retain their

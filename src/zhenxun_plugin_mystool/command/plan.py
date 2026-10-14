@@ -1,4 +1,5 @@
 import asyncio
+from ..storage import data_session
 import threading
 from typing import Union, Optional, Iterable, Dict
 
@@ -40,6 +41,7 @@ CommandRegistry.set_usage(
 
 
 @manually_game_sign.handle()
+@data_session
 async def _(event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=CommandArg()):
     """
     手动游戏签到函数
@@ -98,6 +100,7 @@ CommandRegistry.set_usage(
 
 
 @manually_bbs_sign.handle()
+@data_session
 async def _(event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=CommandArg()):
     """
     手动米游币任务函数
@@ -176,6 +179,7 @@ CommandRegistry.set_usage(
 
 
 @manually_genshin_note_check.handle()
+@data_session
 async def _(event: Union[GeneralMessageEvent], matcher: Matcher):
     """
     手动查看原神便笺
@@ -207,6 +211,7 @@ CommandRegistry.set_usage(
 
 
 @manually_starrail_note_check.handle()
+@data_session
 async def _(event: Union[GeneralMessageEvent], matcher: Matcher):
     """
     手动查看星穹铁道便笺（sr）
@@ -371,7 +376,7 @@ async def perform_game_sign(
     # 如果全部登录失效，则关闭通知
     if len(failed_accounts) == len(user.accounts):
         user.enable_notice = False
-        PluginDataManager.write_plugin_data()
+        await PluginDataManager.save()
 
 
 async def perform_bbs_sign(
@@ -523,7 +528,7 @@ async def perform_bbs_sign(
     # 如果全部登录失效，则关闭通知
     if len(failed_accounts) == len(user.accounts):
         user.enable_notice = False
-        PluginDataManager.write_plugin_data()
+        await PluginDataManager.save()
 
 
 async def genshin_note_check(user: UserData, user_ids: Iterable[str], matcher: Matcher = None):
@@ -714,6 +719,7 @@ def daily_update():
                          hour=plugin_config.preference.plan_time.split(':')[0],
                          minute=plugin_config.preference.plan_time.split(':')[1],
                          id="daily_schedule")
+@data_session
 async def daily_schedule():
     """
     自动米游币任务、游戏签到函数
@@ -729,6 +735,7 @@ async def daily_schedule():
 @scheduler.scheduled_job("interval",
                          minutes=plugin_config.preference.resin_interval,
                          id="resin_check")
+@data_session
 async def auto_note_check():
     """
     自动查看实时便笺

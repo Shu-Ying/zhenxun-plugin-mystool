@@ -23,20 +23,35 @@ discover the plugin through its metadata. Prefix changes require a restart.
 
 ## Configuration and data
 
-Operational preferences and image-generation settings are registered under
-mystool in zhenxun data/config.yaml. Explicit zhenxun values take precedence;
-missing fields are initialized from legacy configV2.json, then plugin defaults.
-Existing zhenxun values are never overwritten by legacy configuration. Migrated
-configuration uses the framework's persistence and help-description mechanism.
-Invalid configuration is reported without silently replacing user data.
+Operational preferences and image settings are individual RegisterConfig items
+in PluginExtraData.configs. Each entry has a meaningful key, value, help and
+default_value, with type validation appropriate to that field. The host's
+plugin module stores these in data/config.yaml and exposes them to management.
+PREFERENCE and GOOD_LIST_IMAGE_CONFIG grouped dictionaries are removed.
+Explicit host values override defaults. No configV2.json or legacy data/config
+source is read. Access lists use individual configuration list entries rather
+than text-file paths. Invalid values report errors before business operations.
+Operational configuration is resolved before command registration and job setup.
+Device/salt environment overrides keep their separate role. Startup-bound
+settings require restart; the command prefix remains non-empty by default.
 
-Existing accounts, cookies, user bindings, user notification preferences and
-exchange plans remain readable at their existing data paths. Operational
-configuration is resolved before command registration and schedule creation.
-Device/salt environment overrides and user-specific configuration keep their
-existing roles. Changes to startup-bound settings require a restart.
-Legacy qq_guild data remains readable solely for compatibility and is no longer
-read or updated by command or notification logic.
+All mutable business state uses registered zhenxun ORM models in the host's
+existing database: user identity/UUID, accounts and cookies, bindings, exchange
+plans and per-user switches/settings. Related modifications use the same host
+transaction connection; they are awaited before reporting success. Persistence
+errors roll back the database and reconcile cached business objects. Concurrent
+commands/tasks preserve unrelated state and enforce binding/plan consistency.
+No separate database file, Tortoise initialization or production connection
+changes are introduced. Multi-record reads use a consistent database snapshot.
+
+Storage initialization runs after host DB schema initialization and before
+data-consuming jobs. Persisted accounts, bindings and plans survive restart.
+Exchange callbacks use the async transaction path, not synchronous file writes
+or unobserved background persistence. External API requests and waits are outside
+database transactions. This unreleased version starts from database state only:
+remove JSON import/export, upgrade modules, legacy guild compatibility fields,
+dataV2.json/plugin_data.json paths and configV2.json paths. Do not import or modify
+old files. Image/cache assets and log files remain ordinary files.
 
 ## Scheduling and compatibility
 
@@ -48,8 +63,12 @@ are part of automated validation.
 ## Verification and installation
 
 Focused checks cover plugin loading, metadata, text/image sending, failure
-handling, command routing and configuration/data compatibility. Documentation
-describes external-plugin installation and any user-visible migration changes.
+handling, command routing, individual configuration registration and real
+database behavior. Tests verify startup order, restart restoration, transaction
+rollback and independent concurrent updates using isolated temporary databases.
+No production database or account actions occur. The user's rewritten README
+must remain byte-for-byte unchanged; configuration help and formal change
+documents carry new storage/config explanations.
 Mocked delivery and actual connected-bot delivery are reported separately.
 The plugin repository requirements.txt supplies qrcode>=7.4.2,<9.0.0 and
 ntplib>=0.4.0,<0.5.0 for installation into the host's actual virtual environment.

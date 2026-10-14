@@ -13,12 +13,10 @@ from ..model.common import data_path
 if TYPE_CHECKING:
     IntStr = Union[int, str]
 
-__all__ = ["plugin_config_path", "Preference",
+__all__ = ["Preference",
            "GoodListImageConfig", "SaltConfig", "DeviceConfig", "PluginConfig", "PluginEnv", "plugin_config",
            "plugin_env", "zhenxun_configs"]
 
-plugin_config_path = data_path / "configV2.json"
-"""插件数据文件默认路径"""
 _driver = nonebot.get_driver()
 
 
@@ -65,7 +63,7 @@ class Preference(BaseModel):
     add_friend_welcome: bool = True
     '''用户添加机器人为好友以后，是否发送使用指引信息'''
     command_start: str = ""
-    '''插件内部命令头(若为""空字符串则不启用)'''
+    '''插件内部命令头，空值使用米游社；修改后重启生效'''
     sleep_time: float = 2
     '''任务操作冷却时间(如米游币任务)'''
     plan_time: str = "00:30"
@@ -83,26 +81,38 @@ class Preference(BaseModel):
         "challenge": "{challenge}"
     }
     '''极验Geetest人机验证打码API发送的JSON数据 `{gt}`, `{challenge}` 为占位符'''
-    override_device_and_salt: bool = False
-    """是否读取插件数据文件中的 device_config 设备配置 和 salt_config 配置而不是默认配置（一般情况不建议开启）"""
     enable_blacklist: bool = False
     """是否启用用户黑名单"""
-    blacklist_path: Optional[Path] = data_path / "blacklist.txt"
-    """用户黑名单文件路径"""
+    blacklist: list[str] = []
+    """用户黑名单"""
     enable_whitelist: bool = False
     """是否启用用户白名单"""
-    whitelist_path: Optional[Path] = data_path / "whitelist.txt"
-    """用户白名单文件路径"""
+    whitelist: list[str] = []
+    """用户白名单"""
     enable_admin_list: bool = False
     """是否启用管理员名单"""
-    admin_list_path: Optional[Path] = data_path / "admin_list.txt"
-    """管理员名单文件路径"""
+    admin_list: list[str] = []
+    """管理员名单"""
     game_token_app_id: str = "2"
     """米游社二维码登录的应用标识符"""
     qrcode_query_interval: float = 1
     """检查米游社登录二维码扫描情况的请求间隔（单位：秒）"""
     qrcode_wait_time: float = 120
     """等待米游社登录二维码扫描的最长时间（单位：秒）"""
+
+    @validator("plan_time", allow_reuse=True)
+    def validate_plan_time(cls, value):
+        hour, minute = value.split(":")
+        if len(hour) != 2 or len(minute) != 2 or not 0 <= int(hour) < 24 or not 0 <= int(minute) < 60:
+            raise ValueError("每日任务时间必须为 HH:MM")
+        return value
+
+    @validator("timeout", "qrcode_query_interval", "qrcode_wait_time", "resin_interval",
+               "exchange_thread_count", allow_reuse=True)
+    def validate_positive(cls, value):
+        if value <= 0:
+            raise ValueError("此配置必须大于零")
+        return value
 
     @validator("log_path", allow_reuse=True)
     def _(cls, v: Optional[Path]):
@@ -253,9 +263,9 @@ class PluginEnv(BaseSettings):
         env_file = '.env'
 
 
-from .zhenxun_config import load_config
+from ..configuration import load_config
 
-plugin_config, zhenxun_configs = load_config(PluginConfig, plugin_config_path)
+plugin_config, zhenxun_configs = load_config(PluginConfig)
 
 # TODO: 可能产生 #271 的问题 https://github.com/Ljzd-PRO/nonebot-plugin-mystool/issues/271
 # @_driver.on_startup

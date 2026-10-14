@@ -1,4 +1,5 @@
 import asyncio
+from ..storage import data_session
 import io
 import os
 import random
@@ -63,6 +64,7 @@ myb_exchange_plan_usage = CommandRegistry.get_usage(myb_exchange_plan)
 
 
 @myb_exchange_plan.handle()
+@data_session
 async def _(
         event: Union[GeneralMessageEvent],
         matcher: Matcher,
@@ -131,6 +133,7 @@ async def _(
 
 
 @myb_exchange_plan.got('bbs_uid')
+@data_session
 async def _(
         event: Union[GeneralMessageEvent],
         matcher: Matcher,
@@ -144,12 +147,13 @@ async def _(
         await matcher.finish('🚪已成功退出')
     user_account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts
     if bbs_uid in user_account:
-        state["account"] = user_account[bbs_uid]
+        state["bbs_uid"] = bbs_uid
     else:
         await matcher.reject('⚠️您发送的账号不在以上账号内，请重新发送')
 
 
 @myb_exchange_plan.got('good_id')
+@data_session
 async def _(
         event: Union[GeneralMessageEvent],
         matcher: Matcher,
@@ -159,7 +163,7 @@ async def _(
     """
     处理三级命令，即商品ID
     """
-    account: UserAccount = state['account']
+    account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts[state['bbs_uid']]
     command_2 = state['command_2']
     if command_2 == '+':
         good_dict = {
@@ -221,13 +225,8 @@ async def _(
             for plan in plans:
                 if plan.good.goods_id == good_id:
                     plans.discard(plan)
-                    PluginDataManager.write_plugin_data()
-                    for i in range(plugin_config.preference.exchange_thread_count):
-                        try:
-                            scheduler.remove_job(job_id=f"exchange-plan-{hash(plan)}-{i}")
-                        except scheduler.JobLookupError:
-                            # TODO: 原因不明，暂时忽略异常
-                            pass
+                    await PluginDataManager.save()
+                    cancel_plan(event.get_user_id(), plan)
                     await matcher.finish('兑换计划删除成功')
             await matcher.finish(f"您没有设置商品ID为 {good_id} 的兑换哦~")
         else:
@@ -240,6 +239,7 @@ async def _(
 
 
 @myb_exchange_plan.got('game_uid')
+@data_session
 async def _(
         event: Union[GeneralMessageEvent],
         matcher: Matcher,
@@ -250,7 +250,7 @@ async def _(
     初始化商品兑换任务，如果传入UID为None则为实物商品，仍可继续
     """
     user = PluginDataManager.plugin_data.users[event.get_user_id()]
-    account: UserAccount = state['account']
+    account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts[state['bbs_uid']]
     good: Good = state['good']
     if good.is_virtual:
         records: List[GameRecord] = state['records']
@@ -263,6 +263,7 @@ async def _(
         plan = ExchangePlan(good=good, address=account.address, game_record=record, account=account)
     else:
         plan = ExchangePlan(good=good, address=account.address, account=account)
+    plan.account = account
     if plan in user.exchange_plans:
         await matcher.finish('⚠️您已经配置过该商品的兑换哦！')
     else:
@@ -273,20 +274,10 @@ async def _(
             if not fp_status:
                 await matcher.send(
                     '⚠️从服务器获取device_fp失败！兑换时将在本地生成device_fp。你也可以尝试重新添加兑换计划。')
-        PluginDataManager.write_plugin_data()
+        await PluginDataManager.save()
 
     # 初始化兑换任务
-    finished.setdefault(plan, [])
-    for i in range(plugin_config.preference.exchange_thread_count):
-        scheduler.add_job(
-            good_exchange_sync,
-            "date",
-            id=f"exchange-plan-{hash(plan)}-{i}",
-            replace_existing=True,
-            args=(plan,),
-            run_date=datetime.fromtimestamp(good.time),
-            max_instances=plugin_config.preference.exchange_thread_count
-        )
+    schedule_plan(event.get_user_id(), plan)
 
     await matcher.finish(
         f'🎉设置兑换计划成功！将于 {plan.good.time_text} 开始兑换，到时将会私聊告知您兑换结果')
@@ -304,6 +295,7 @@ CommandRegistry.set_usage(
 
 
 @get_good_image.handle()
+@data_session
 async def _(_: Union[GeneralMessageEvent], matcher: Matcher, arg=CommandArg()):
     # 若有使用二级命令，即传入了想要查看的商品类别，则跳过询问
     if arg:
@@ -360,138 +352,7 @@ async def _(event: Union[GeneralMessageEvent], arg=ArgPlainText("content")):
             f'{arg[1]} 分区暂时没有可兑换的限时商品。如果这与实际不符，你可以尝试用『{COMMAND_BEGIN}商品 更新』进行更新。')
 
 
-lock = threading.Lock()
-finished: Dict[ExchangePlan, List[bool]] = {}
-
-
-@lambda func: scheduler.add_listener(func, EVENT_JOB_EXECUTED)
-def exchange_notice(event: JobExecutionEvent):
-    """
-    接收兑换结果
-    """
-    if event.job_id.startswith("exchange-plan"):
-        loop = asyncio.get_event_loop()
-
-        thread_id = int(event.job_id.split('-')[-1]) + 1
-        result: Tuple[ExchangeStatus, Optional[ExchangeResult]] = event.retval
-        exchange_status, exchange_result = result
-
-        if not exchange_status:
-            hash_value = int(event.job_id.split('-')[-2])
-            user_id_filter = filter(lambda x: hash(x[1].exchange_plans) == hash_value, get_unique_users())
-            user_id = next(user_id_filter)
-            user_ids = [user_id] + list(get_all_bind(user_id))
-            plans = PluginDataManager.plugin_data.users[user_id].exchange_plans
-
-            with lock:
-                for plan in plans:
-                    finished[plan].append(False)
-                    for _user_id in user_ids:
-                        loop.create_task(
-                            send_private_msg(
-                                user_id=_user_id,
-                                message=f"⚠️账户 {plan.account.display_name}"
-                                        f"\n- {plan.good.general_name}"
-                                        f"\n- 线程 {thread_id}"
-                                        f"\n- 兑换请求发送失败"
-                            )
-                        )
-                    if len(finished[plan]) == plugin_config.preference.exchange_thread_count:
-                        del plan
-                        PluginDataManager.write_plugin_data()
-
-        else:
-            plan = exchange_result.plan
-            user_filter = filter(lambda x: plan in x[1].exchange_plans, get_unique_users())
-            user_id, user = next(user_filter)
-            user_ids = [user_id] + list(get_all_bind(user_id))
-            with lock:
-                # 如果已经有一个线程兑换成功，就不再接收结果
-                if True not in finished[plan]:
-                    if exchange_result.result:
-                        finished[plan].append(True)
-                        for _user_id in user_ids:
-                            loop.create_task(
-                                send_private_msg(
-                                    user_id=_user_id,
-                                    message=f"🎉账户 {plan.account.display_name}"
-                                            f"\n- {plan.good.general_name}"
-                                            f"\n- 线程 {thread_id}"
-                                            f"\n- 兑换成功"
-                                )
-                            )
-                    else:
-                        finished[plan].append(False)
-                        for _user_id in user_ids:
-                            loop.create_task(
-                                send_private_msg(
-                                    user_id=_user_id,
-                                    message=f"💦账户 {plan.account.display_name}"
-                                            f"\n- {plan.good.general_name}"
-                                            f"\n- 线程 {thread_id}"
-                                            f"\n- 兑换失败"
-                                )
-                            )
-
-                if len(finished[plan]) == plugin_config.preference.exchange_thread_count:
-                    try:
-                        user.exchange_plans.remove(plan)
-                    except KeyError:
-                        pass
-                    else:
-                        PluginDataManager.write_plugin_data()
-
-
-async def exchange_begin(plan: ExchangePlan):
-    """
-    到点后执行兑换
-
-    :param plan: 兑换计划
-    """
-    duration = 0
-    random_x, random_y = plugin_config.preference.exchange_latency
-    exchange_status, exchange_result = ExchangeStatus(), None
-
-    # 在兑换开始后的一段时间内，不断尝试兑换，直到成功（因为太早兑换可能被认定不在兑换时间）
-    while duration < plugin_config.preference.exchange_duration:
-        latency = random.uniform(random_x, random_y)
-        time.sleep(latency)
-        exchange_status, exchange_result = await good_exchange(plan)
-        if exchange_status and exchange_result.result:
-            break
-        duration += latency
-    return exchange_status, exchange_result
-
-
-@_driver.on_startup
-async def _():
-    """
-    启动机器人时自动初始化兑换任务
-    """
-    for user_id, user in PluginDataManager.plugin_data.users.items():
-        plans = user.exchange_plans
-        for plan in plans:
-            good_detail_status, good = await get_good_detail(plan.good)
-            if not good_detail_status or not good.time or good.time < time.time():
-                # 若商品不存在则删除
-                # 若重启时兑换超时则删除该兑换
-                _ = list(user.exchange_plans)
-                _.remove(plan)
-                user.exchange_plans = set(_)
-                PluginDataManager.write_plugin_data()
-                continue
-            else:
-                finished.setdefault(plan, [])
-                for i in range(plugin_config.preference.exchange_thread_count):
-                    scheduler.add_job(
-                        exchange_begin,
-                        "date",
-                        id=f"exchange-plan-{hash(plan)}-{i}",
-                        replace_existing=True,
-                        args=(plan,),
-                        run_date=datetime.fromtimestamp(good.time),
-                        max_instances=plugin_config.preference.exchange_thread_count
-                    )
+from ..services.exchange_jobs import schedule_plan, cancel_plan
 
 
 def image_process(game: str, _lock: Lock = None):

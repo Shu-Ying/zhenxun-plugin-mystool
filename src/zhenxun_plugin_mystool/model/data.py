@@ -1,15 +1,13 @@
-import json
-from json import JSONDecodeError
 from typing import Union, Optional, Any, Dict, TYPE_CHECKING, AbstractSet, \
     Mapping, Set, Literal, List
 from uuid import UUID, uuid4
 
 from httpx import Cookies
 from nonebot.log import logger
-from pydantic.v1 import BaseModel, ValidationError, validator, Field
+from pydantic.v1 import BaseModel, validator
 
 from .._version import __version__
-from ..model.common import data_path, BaseModelWithSetter, Address, BaseModelWithUpdate, Good, GameRecord
+from ..model.common import BaseModelWithSetter, Address, BaseModelWithUpdate, Good, GameRecord
 
 if TYPE_CHECKING:
     IntStr = Union[int, str]
@@ -17,14 +15,9 @@ if TYPE_CHECKING:
     AbstractSetIntStr = AbstractSet[IntStr]
     MappingIntStrAny = Mapping[IntStr, Any]
 
-__all__ = ["plugin_data_path", "BBSCookies", "UserAccount", "ExchangePlan", "ExchangeResult", "uuid4_validate",
+__all__ = ["BBSCookies", "UserAccount", "ExchangePlan", "ExchangeResult", "uuid4_validate",
            "UserData", "PluginData", "PluginDataManager"]
 
-plugin_data_path = data_path / "dataV2.json"
-_uuid_set: Set[str] = set()
-"""已使用的用户UUID密钥集合"""
-_new_uuid_in_init = False
-"""插件反序列化用户数据时，是否生成了新的UUID密钥"""
 
 
 class BBSCookies(BaseModelWithSetter, BaseModelWithUpdate):
@@ -382,10 +375,6 @@ class UserData(BaseModelWithSetter):
     '''极验Geetest人机验证打码API发送的参数（除gt，challenge外）'''
     uuid: Optional[str] = None
     """用户UUID密钥，用于不同NoneBot适配器平台之间的数据同步，因此不可泄露"""
-    qq_guild: Optional[Dict[str, int]] = {}
-    """储存用户所在的QQ频道ID {用户ID : 频道ID}"""
-    qq_guilds: Optional[Dict[str, List[int]]] = Field(default={}, exclude=True)
-    """旧版（v2.1.0 之前）储存用户所在的QQ频道ID {用户ID : [频道ID]}"""
     exchange_plans: Union[Set[ExchangePlan], List[ExchangePlan]] = set()
     """兑换计划列表"""
     accounts: Dict[str, UserAccount] = {}
@@ -398,11 +387,11 @@ class UserData(BaseModelWithSetter):
 
         :raises ValueError: UUID格式错误，不是合法的UUIDv4
         """
-        if v is None and not uuid4_validate(v):
+        if v is not None and not uuid4_validate(v):
             raise ValueError("UUID格式错误，不是合法的UUIDv4")
+        return v
 
     def __init__(self, **data: Any):
-        global _new_uuid_in_init
         super().__init__(**data)
 
         exchange_plans = self.exchange_plans
@@ -412,16 +401,7 @@ class UserData(BaseModelWithSetter):
             self.exchange_plans.add(plan)
 
         if self.uuid is None:
-            new_uuid = uuid4()
-            while str(new_uuid) in _uuid_set:
-                new_uuid = uuid4()
-            self.uuid = str(new_uuid)
-            _new_uuid_in_init = True
-        _uuid_set.add(self.uuid)
-
-        # 读取旧版配置中的 qq_guilds 信息，对每个账号取第一个 GuildID 值以生成新的 qq_guild Dict
-        if not self.qq_guild:
-            self.qq_guild = {k: v[0] for k, v in filter(lambda x: x[1], self.qq_guilds.items())}
+            self.uuid = str(uuid4())
 
     def __hash__(self):
         return hash(self.uuid)
@@ -435,13 +415,12 @@ class PluginData(BaseModel):
     users: Dict[str, UserData] = {}
     '''所有用户数据'''
 
-    def do_user_bind(self, src: str = None, dst: str = None, write: bool = False):
+    def do_user_bind(self, src: str = None, dst: str = None):
         """
         执行用户数据绑定同步，将src指向dst的用户数据，即src处的数据将会被dst处的数据对象替换
 
         :param src: 源用户数据，为空则读取 self.user_bind 并执行全部绑定
         :param dst: 目标用户数据，为空则读取 self.user_bind 并执行全部绑定
-        :param write: 是否写入插件数据文件
         """
         if None in [src, dst]:
             for x, y in self.user_bind.items():
@@ -455,73 +434,13 @@ class PluginData(BaseModel):
                 self.users[src] = self.users[dst]
             except KeyError:
                 logger.error(f"用户数据绑定失败，目标用户 {dst} 不存在")
-            else:
-                if write:
-                    PluginDataManager.write_plugin_data()
 
     def __init__(self, **data: Any):
         super().__init__(**data)
-        self.do_user_bind(write=True)
+        self.do_user_bind()
 
     class Config:
         json_encoders = UserAccount.Config.json_encoders
 
 
-class PluginDataManager:
-    plugin_data: Optional[PluginData] = None
-    """加载出的插件数据对象"""
-
-    @classmethod
-    def load_plugin_data(cls):
-        """
-        加载插件数据文件
-        """
-        if plugin_data_path.exists() and plugin_data_path.is_file():
-            try:
-                with open(plugin_data_path, "r") as f:
-                    plugin_data_dict = json.load(f)
-                # 读取完整的插件数据
-                cls.plugin_data = PluginData.parse_obj(plugin_data_dict)
-            except (ValidationError, JSONDecodeError):
-                logger.exception(f"读取插件数据文件失败，请检查插件数据文件 {plugin_data_path} 格式是否正确")
-                raise
-            except Exception:
-                logger.exception(
-                    f"读取插件数据文件失败，请检查插件数据文件 {plugin_data_path} 是否存在且有权限读取和写入")
-                raise
-        else:
-            cls.plugin_data = PluginData()
-            try:
-                str_data = cls.plugin_data.json(indent=4)
-                plugin_data_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(plugin_data_path, "w", encoding="utf-8") as f:
-                    f.write(str_data)
-            except (AttributeError, TypeError, ValueError, PermissionError):
-                logger.exception(f"创建插件数据文件失败，请检查是否有权限读取和写入 {plugin_data_path}")
-                raise
-            else:
-                logger.info(f"插件数据文件 {plugin_data_path} 不存在，已创建默认插件数据文件。")
-
-    @classmethod
-    def write_plugin_data(cls):
-        """
-        写入插件数据文件
-
-        :return: 是否成功
-        """
-        try:
-            str_data = cls.plugin_data.json(indent=4)
-        except (AttributeError, TypeError, ValueError):
-            logger.exception("数据对象序列化失败，可能是数据类型错误")
-            return False
-        else:
-            with open(plugin_data_path, "w", encoding="utf-8") as f:
-                f.write(str_data)
-            return True
-
-
-PluginDataManager.load_plugin_data()
-
-# 如果插件数据文件加载后，发现有用户没有UUID密钥，进行了生成，则需要保存写入
-if _new_uuid_in_init:
-    PluginDataManager.write_plugin_data()
+from ..storage import PluginDataManager

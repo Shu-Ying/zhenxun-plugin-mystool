@@ -1,4 +1,5 @@
 import asyncio
+from ..storage import data_session
 from typing import Union
 
 from nonebot import on_command
@@ -29,6 +30,7 @@ CommandRegistry.set_usage(
 
 
 @address_matcher.handle()
+@data_session
 async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State):
     if isinstance(event, GeneralGroupMessageEvent):
         await address_matcher.finish("⚠️为了保护您的隐私，请私聊进行地址设置。")
@@ -49,6 +51,7 @@ async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State)
 
 
 @address_matcher.got('bbs_uid')
+@data_session
 async def _(event: Union[GeneralPrivateMessageEvent], state: T_State, bbs_uid=ArgStr()):
     if bbs_uid == '退出':
         await address_matcher.finish('🚪已成功退出')
@@ -57,7 +60,7 @@ async def _(event: Union[GeneralPrivateMessageEvent], state: T_State, bbs_uid=Ar
     if bbs_uid not in user_account:
         await address_matcher.reject('⚠️您发送的账号不在以上账号内，请重新发送')
     account = user_account[bbs_uid]
-    state['account'] = account
+    state['bbs_uid'] = bbs_uid
 
     address_status, address_list = await get_address(account)
     state['address_list'] = address_list
@@ -86,16 +89,17 @@ async def _(event: Union[GeneralPrivateMessageEvent], state: T_State, bbs_uid=Ar
 
 
 @address_matcher.got('address_id', prompt='请发送你要选择的地址ID')
-async def _(_: Union[GeneralPrivateMessageEvent], state: T_State, address_id=ArgStr()):
+@data_session
+async def _(event: Union[GeneralPrivateMessageEvent], state: T_State, address_id=ArgStr()):
     if address_id == "退出":
         await address_matcher.finish("🚪已成功退出")
 
     address_filter = filter(lambda x: x.id == address_id, state['address_list'])
     address = next(address_filter, None)
     if address is not None:
-        account: UserAccount = state["account"]
+        account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts[state["bbs_uid"]]
         account.address = address
-        PluginDataManager.write_plugin_data()
+        await PluginDataManager.save()
         await address_matcher.finish(f"🎉已成功设置账户 {account.display_name} 的地址")
     else:
         await address_matcher.reject("⚠️您发送的地址ID与查询结果不匹配，请重新发送")

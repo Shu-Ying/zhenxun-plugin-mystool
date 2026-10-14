@@ -51,12 +51,6 @@ __plugin_meta__ = PluginMetadata(
     ).to_dict()
 )
 
-# 升级 V1 版本插件数据文件
-
-from .model.upgrade import upgrade_plugin_data
-
-upgrade_plugin_data()
-
 # 防止多进程生成图片时反复调用
 
 from .utils import CommandBegin

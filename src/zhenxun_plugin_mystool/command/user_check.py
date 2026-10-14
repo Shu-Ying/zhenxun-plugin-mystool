@@ -1,4 +1,5 @@
 import asyncio
+from ..storage import data_session
 from typing import Union
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ friendRequest = on_request(priority=1, block=True)
 
 
 @friendRequest.handle()
+@data_session
 async def _(bot: OneBotV11Bot, event: RequestEvent):
     # 判断为加好友事件
     if isinstance(event, FriendRequestEvent):
@@ -67,6 +69,7 @@ user_binding_usage = CommandRegistry.get_usage(user_binding)
 
 
 @user_binding.handle()
+@data_session
 async def _(
         event: Union[GeneralMessageEvent],
         matcher: Matcher,
@@ -111,7 +114,7 @@ async def _(
             else:
                 del PluginDataManager.plugin_data.user_bind[user_id]
                 del PluginDataManager.plugin_data.users[user_id]
-                PluginDataManager.write_plugin_data()
+                await PluginDataManager.save()
                 await matcher.send("✔已清除当前用户的绑定关系，当前用户数据已是空白数据")
 
         elif command[1] in ["刷新UUID", "刷新uuid"]:
@@ -131,7 +134,7 @@ async def _(
                 del PluginDataManager.plugin_data.user_bind[key]
                 del PluginDataManager.plugin_data.users[key]
             PluginDataManager.plugin_data.users[target_id].uuid = str(uuid4())
-            PluginDataManager.write_plugin_data()
+            await PluginDataManager.save()
 
             await matcher.send(
                 f"{'✔已刷新UUID密钥，原先绑定的用户将无法访问当前用户数据' if be_bind else '✔已刷新您绑定的用户数据的UUID密钥，目前您的用户数据已为空，您也可以再次绑定'}\n"
@@ -172,5 +175,5 @@ async def _(
             if isinstance(event, GeneralGroupMessageEvent):
                 user.uuid = str(uuid4())
                 await matcher.send("🔑由于您在群聊中进行绑定，已刷新您的UUID密钥，但不会影响其他已绑定用户")
-            PluginDataManager.write_plugin_data()
+            await PluginDataManager.save()
             await matcher.send(f"✔已绑定用户 {target_id} 的用户数据")

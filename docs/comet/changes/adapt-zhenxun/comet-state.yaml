@@ -3,10 +3,10 @@ name: adapt-zhenxun
 language: en
 phase: verify
 status: await-user
-state_version: 26
+state_version: 34
 brief: brief.md
 document_constraints_version: 2
-shape_confirmation_hash: 3b4098ee203b1303be1bde49123d617c8d3b0d3ae33422d4924ee784193d7c18
+shape_confirmation_hash: b7814b173b456dcfee2faddaf5e7dfc3d2b0adf45b411830d8354374171fc67f
 spec_changes:
   - capability: zhenxun-integration
     operation: create
@@ -18,11 +18,11 @@ workspace:
   finish: null
 loop:
   stage: await-user
-  goal_cycle: 2
-  iteration: 1
+  goal_cycle: 3
+  iteration: 2
   attempt: 1
   retry_epoch: 0
-  failed_iteration_count: 0
+  failed_iteration_count: 1
   no_progress_count: 0
   execution_failure_count: 0
   previous_unresolved_ids: []
@@ -35,9 +35,7 @@ acceptance:
       management and help generation.
     result: passed
     reason:
-      text: 源码入口只支持OneBot并require
-        alconna/apscheduler；QQ导入阻断fixture完成加载、元数据与真寻管理注册；绑定Runtime integration
-        16 passed。
+      text: 独立核对新包初始化、PluginExtraData与宿主模型自动注册。隔离fixture拦截QQ适配器导入并加载实际宿主服务；本轮integration通过插件加载、metadata及管理配置测试，不依赖SAA或QQ官方适配器。
       truncated: false
   - id: A2
     source: brief.md
@@ -46,7 +44,7 @@ acceptance:
       failure without claiming success.
     result: passed
     reason:
-      text: utils/common.py仅筛选OneBot；指定Bot或Adapter不会回退到全局Bot；PlatformUtils保持文字与图片且无回执/异常返回失败。正式集成覆盖API图片导出及失败日志；login/exchange/plan差异只删除QQ分支，OneBot图片及奖励通知分支保留。
+      text: common.send_private_msg使用MessageUtils与PlatformUtils，明确Bot/Adapter选择，失败/无回执/无可用Bot返回失败。绑定integration覆盖OneBot文字、图片导出、选择及日志；真实Bot送达未运行。
       truncated: false
   - id: A3
     source: brief.md
@@ -55,46 +53,57 @@ acceptance:
       usable.
     result: passed
     reason:
-      text: 加载配置归一非空前缀，所有命令规则保持前缀；正式检查覆盖宿主无前缀命令不命中、私信响应及别名不再命中。帮助元数据、欢迎语使用统一前缀。
+      text: 命令和metadata统一使用非空配置前缀，空值回退米游社；帮助/验证码/好友欢迎语使用COMMAND_BEGIN。绑定测试验证前缀匹配与宿主未加前缀命令不被吞掉，以及custom配置往返。
       truncated: false
   - id: A4
     source: brief.md
-    text: Explicit zhenxun configuration takes precedence over legacy configV2.json;
-      absent fields migrate from legacy configuration, then use defaults.
-      Existing account data, cookies, bindings and exchange plans remain
-      readable.
+    text: Each configurable setting is separately registered through PluginExtraData
+      RegisterConfig entries and round-trips through the host config generation
+      and reload with its correct type, help and default. No old grouped
+      dictionaries, configV2.json or access-list text files are read or written.
     result: passed
     reason:
-      text: model/zhenxun_config.py保留真寻显式值>legacy缺失字段>defaults并持久化；测试包含稀疏yaml生成/重载与legacy删除后持久化，账号/Cookies/绑定/计划及旧qq_guild数据可读。源码搜索无命令/通知对qq_guild读取更新，仅兼容模型保留。
+      text: configuration/keys与registry按全部Preference及图片字段分别产生RegisterConfig并注入PluginExtraData.configs，每项具有value/default/help/parser。测试经宿主生成config.yaml及reload验证类型、中文键和名单，并拒绝非法时间等值；旧字典与JSON/名单文本路径已移除。
       truncated: false
   - id: A5
+    source: brief.md
+    text: Users, accounts, cookies, bindings, exchange plans and per-user settings
+      are durably stored in the host database. Fresh initialization and restart
+      restore data; transaction failures roll back and concurrency preserves
+      independent updates. No business JSON files are created or used.
+    result: passed
+    reason:
+      text: storage拆分ORM模型、codec、repository、session，使用真寻Model默认连接和in_transaction，不创建私有连接。事务内读取/差异合并/版本协调，外部请求在事务外；失败重置会话并回滚。绑定测试实际临时SQLite验证账号Cookies/用户UUID/绑定/计划/设置往返、关闭连接重读、独立并发合并与冲突拒绝、Task所有权隔离及回滚。命令保存await后报告成功，对话保留ID重新读取，账户删除事务内移除计划。
+      truncated: false
+  - id: A6
     source: brief.md
     text: Scheduled sign-in, coin tasks and note reminders retain their timing and
       notification switches; focused checks do not contact production accounts.
     result: passed
     reason:
-      text: plan.py每日cron/便笺interval和各通知开关保留，QQ删除没有更改任务时序；隔离集成验证注册时刻/提醒任务、模拟验证码通知且未启动真实生命周期或真实账号。
+      text: daily_schedule和auto_note_check保留cron/interval设置与通知开关，均包装隔离会话等待DB就绪；宿主DB优先级1、storage2、恢复3顺序由源与测试验证。exchange_jobs重启恢复、旧计划执行前重验，scheduler监督异步结果处理，末线程提交后通知。绑定测试覆盖恢复/删除计划/提交失败不通知，未联系真实账号。
       truncated: false
-  - id: A6
+  - id: A7
     source: brief.md
-    text: Documentation explains installation, command/configuration changes and
+    text: The user's README remains byte-for-byte unchanged. Code/configuration help
+      and formal change documents explain storage/config behavior and
       verification limits; dependencies permit the target environment. QQ
       official support and its commands are absent from runtime, metadata and
       dependency declarations. requirements.txt installs qrcode and ntplib in
       the host venv.
     result: passed
     reason:
-      text: README明确只支持OneBot和新版模块迁移，含host实际venv
-        requirements安装命令与限制；requirements恰为qrcode>=7.4.2,<9.0.0及ntplib>=0.4.0,<0.5.0，与pyproject一致；正式lock/package/wheel-layout/dependency-scope均通过，QQ依赖及运行命令已删除。
+      text: 本轮fresh-storage-readme校验用户README
+        SHA256与约定一致，git状态README未修改；正式brief/spec解释数据库与配置及验证边界。dependency-scope/wheel-layout/lock/package均通过，QQ官方imports/声明/命令删除，requirements包含与项目匹配qrcode/ntplib约束。
       truncated: false
 builder_handoff:
-  candidate_id: a38bf43d-fc78-44f5-b254-825122b1682d
+  candidate_id: c4282f30-e6cd-4019-bcce-de8f161fb3b4
   identity_provider: skill-coordinated
-  builder_execution_ref: skill-coordinated:builder:9926ded7-3334-4ff7-a8e9-f7e46b645778
-  iteration: 1
+  builder_execution_ref: skill-coordinated:builder:651d4a17-9c08-4416-ba41-fe87dab1c862
+  iteration: 2
   summary:
-    text: 按确认范围完全移除QQ官方适配器运行代码和依赖：事件类型、频道发送、图片、连接钩子、特定异常、私信响应命令及帮助；仅保留OneBot，存量字段仅数据兼容。新增requirements.txt两个依赖，同步README、锁和CI触发路径。定向3项加载/发送检查通过（QQ不可导入）；git
-      diff --check通过。完整计划由Runtime执行，未安装生产依赖、替换宿主副本或推送。
+    text: 实现未发布版本的真寻数据库事务及逐项配置。按用户要求拆分storage/models、codec、repository、session；configuration/keys、registry；services/exchange_jobs。删除旧JSON路径、同步写入和upgrade，命令以独立操作快照await原DB事务保存，支持冲突与回滚，多轮对话只保留账号ID。逐项中文RegisterConfig进入PluginExtraData，名单配置化。新业务缓存/日志目录真寻DATA_PATH；README原样。修复UUID校验遗漏返回值，定向DB/配置/回调检查通过，最终全套计划由Runtime执行。
+      最终首轮27测试通过，唯一失败为测试将真寻相对DATA_PATH与绝对路径直接比较；已改为resolve后比较，保持宿主路径用法。
     truncated: false
   addressed_acceptance_ids:
     - A1
@@ -103,94 +112,98 @@ builder_handoff:
     - A4
     - A5
     - A6
+    - A7
   acceptance_review:
     - id: A1
       status: implemented-with-evidence
       evidence:
-        - src/zhenxun_plugin_mystool/__init__.py
-        - tests/test_zhenxun_integration.py::BlockQQAdapter
+        - src/zhenxun_plugin_mystool/storage/models.py
+        - src/zhenxun_plugin_mystool/storage/session.py::initialize_storage
+        - tests/test_storage.py::test_database_lifecycle_order_and_model_registration
         - tests/test_zhenxun_integration.py::test_loading_and_metadata
-        - zhenxun_loader.py
-      note: QQ阻断环境仍加载新模块及真寻元数据；仅声明OneBot。
+      note: ORM使用宿主Model自动注册；优先级1宿主建库、2存储就绪、3兑换恢复，实测临时宿主加载。
     - id: A2
       status: implemented-with-evidence
       evidence:
         - src/zhenxun_plugin_mystool/utils/common.py::send_private_msg
-        - src/zhenxun_plugin_mystool/command/login.py
-        - src/zhenxun_plugin_mystool/command/plan.py
-        - src/zhenxun_plugin_mystool/command/exchange.py
-        - tests/test_zhenxun_integration.py::test_onebot_image_export_and_adapter_selection
-        - tests/test_zhenxun_integration.py::test_selected_unsupported_bot_is_not_replaced
         - tests/test_zhenxun_integration.py::test_private_message_text_image_and_failure
-        - tests/test_zhenxun_integration.py::test_private_send_failure_is_written_to_plugin_log
-      note: 移除频道目标和参数；保留真寻构造消息与OneBot发送返回契约，unsupported选择不回落；定向API导出验证通过。
+        - tests/test_zhenxun_integration.py::test_onebot_image_export_and_adapter_selection
+      note: OneBot消息保留原框架发送与失败契约，QQ仍未导入。
     - id: A3
       status: implemented-with-evidence
       evidence:
-        - src/zhenxun_plugin_mystool/command/user_check.py
-        - src/zhenxun_plugin_mystool/command/help.py
         - tests/test_zhenxun_integration.py::test_prefixed_command_rules_leave_host_commands_available
         - tests/test_zhenxun_integration.py::test_friend_welcome_uses_plugin_help_prefix
-        - tests/test_zhenxun_integration.py::test_verification_prompt_uses_configured_prefix
-      note: 删去QQ私信响应命令和别名、帮助和metadata；前缀和欢迎语保持正确。
+      note: 统一前缀和原真寻命令可用；QQ命令仍移除。
     - id: A4
       status: implemented-with-evidence
       evidence:
-        - src/zhenxun_plugin_mystool/model/zhenxun_config.py
-        - src/zhenxun_plugin_mystool/model/data.py legacy compatibility unchanged
-        - tests/test_zhenxun_integration.py::test_account_data_and_scheduler_contract
-        - tests/test_zhenxun_integration.py::test_sparse_yaml_migration_survives_host_generation
-      note: 存量qq_guild仅兼容模型，运行不读取或写入；原账号、cookies、绑定、计划和配置持久化保持。
+        - src/zhenxun_plugin_mystool/configuration/keys.py
+        - src/zhenxun_plugin_mystool/configuration/registry.py
+        - tests/test_configuration.py
+        - src/zhenxun_plugin_mystool/model/config.py
+        - src/zhenxun_plugin_mystool/utils/common.py access lists
+      note: 每个字段独立RegisterConfig，归属插件模块；黑白及管理员名单配置化；不存在旧JSON读取、组迁移。定向配置测试通过。
     - id: A5
       status: implemented-with-evidence
       evidence:
-        - src/zhenxun_plugin_mystool/command/plan.py scheduling declarations
-          unchanged
-        - tests/test_zhenxun_integration.py::test_account_data_and_scheduler_contract
-      note: 调度时间和通知开关未修改，测试无生产账号操作。
+        - src/zhenxun_plugin_mystool/storage/models.py
+        - src/zhenxun_plugin_mystool/storage/codec.py
+        - src/zhenxun_plugin_mystool/storage/repository.py
+        - src/zhenxun_plugin_mystool/storage/session.py
+        - tests/test_storage.py::test_database_roundtrip_and_bindings
+        - tests/test_storage.py::test_transaction_failure_rolls_back_database_and_session
+        - tests/test_storage.py::test_concurrent_sessions_preserve_independent_users
+        - tests/test_storage.py::test_conflicting_updates_do_not_overwrite
+        - tests/test_storage.py::test_account_setting_handler_commits_before_finish
+      note: 账户/Cookies、用户设置、绑定和计划分表，事务连接统一；按操作独立快照、差异提交/冲突检测、失败回滚。定向真实SQLite测试通过。
     - id: A6
       status: implemented-with-evidence
       evidence:
-        - README.md
+        - src/zhenxun_plugin_mystool/services/exchange_jobs.py
+        - src/zhenxun_plugin_mystool/command/plan.py
+        - tests/test_storage.py::test_restart_restores_jobs_from_database
+        - tests/test_storage.py::test_exchange_callback_awaits_commit_before_notification
+        - tests/test_storage.py::test_exchange_commit_failure_has_no_success_notification
+        - tests/test_storage.py::test_deleted_plan_is_not_exchanged
+      note: 同步兑换监听仅提交受调度器监督的异步任务；处理结果await提交再通知，执行时DB重新确认计划；重启恢复与定时参数保留。定向测试通过。
+    - id: A7
+      status: implemented-with-evidence
+      evidence:
+        - README.md SHA256
+          7321A4B0AF202D600B87BF590D9A2E1941C074B4DCFC0B224E68BC65A01BFA88
         - requirements.txt
         - pyproject.toml
-        - poetry.lock
-        - .github/workflows/plugin-test.yml
-      note: requirements新增qrcode与ntplib，与Poetry范围一致；官方QQ声明与锁移除，README安装和迁移说明同步。
+        - docs/comet/changes/adapt-zhenxun/brief.md
+        - docs/comet/changes/adapt-zhenxun/specs/zhenxun-integration/spec.md
+      note: 未修改README；变化以正式规格及配置help说明；没有生产DB安装或旧数据导入。
   checks:
     - name:
-        text: no-qq-loading-and-onebot-send
+        text: database-and-configuration-development
         truncated: false
       result: passed
       note:
-        text: 3 passed, 13 deselected; QQ import blocker active, OneBot text/image API
-          export and selected unsupported Bot checked.
+        text: 定向初轮12场景中11通过；UUID稳定性根因修复后并发/回滚/往返4通过。命令/任务隔离/启动顺序4通过。重启及兑换失败/删除4通过。最终全套交Runtime复核。
         truncated: false
     - name:
-        text: lock-regeneration
+        text: first-formal-checks
         truncated: false
-      result: passed
+      result: failed
       note:
-        text: uvx poetry lock exited0; no QQ package remains.
-        truncated: false
-    - name:
-        text: diff-format
-        truncated: false
-      result: passed
-      note:
-        text: git diff --check exited0.
+        text: "27 passed,1 failed:
+          相对与绝对DATA_PATH测试断言不一致，已校正断言；其余6正式checks通过。最终由Runtime重验。"
         truncated: false
   checks_truncated: false
   known_limits:
-    - text: 实际 Bot 送达、QQ 主动私信额度及审核未验证。
+    - text: 真实Bot送达和米游社账号动作未运行，生产环境未安装或更改。
       truncated: false
-    - text: 本地运行 Python 3.13；CI Python 3.10/3.11/3.12 未在本机执行，也未运行远程 CI。
+    - text: 数据库运行验证使用宿主配置方式的临时SQLite；PostgreSQL/MySQL及远程CI未执行。
       truncated: false
-    - text: 代码适配与隔离集成验证完成，未安装到真寻生产环境或启动真实任务。
+    - text: 本机Python3.13；3.10/3.11/3.12由已有CI矩阵覆盖但本轮未实际执行。
       truncated: false
   known_limits_truncated: false
   review: null
-  submitted_at: 2026-10-14T04:10:22.714Z
+  submitted_at: 2026-10-14T07:13:39.085Z
 blockers:
   - owner: user
     reason:
@@ -200,10 +213,10 @@ blockers:
     acceptance_ids: []
     resolution_action: await-user
 verification:
-  candidate_id: a38bf43d-fc78-44f5-b254-825122b1682d
+  candidate_id: c4282f30-e6cd-4019-bcce-de8f161fb3b4
   identity_provider: skill-coordinated
-  verifier_execution_ref: skill-coordinated:verifier:b964e04d-fe94-4225-8560-3e117b32b4c3
-  iteration: 1
+  verifier_execution_ref: skill-coordinated:verifier:82b1aa32-1a69-4c93-9d4f-afa323fd63ae
+  iteration: 2
   attempt: 1
   assurance: skill-coordinated
   verdict: pass
@@ -217,14 +230,14 @@ verification:
           truncated: false
         - text: import os, runpy, sys; os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD']='1';
             os.environ['PYTHONUTF8']='1';
-            sys.argv=['pytest','tests/test_zhenxun_integration.py','-q','--disable-warnings'];
+            sys.argv=['pytest','tests/test_zhenxun_integration.py','tests/test_configuration.py','tests/test_storage.py','-q','--disable-warnings'];
             runpy.run_module('pytest',run_name='__main__')
           truncated: false
       argv_truncated: false
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 11257
+      duration_ms: 10824
     - id: syntax
       name:
         text: syntax
@@ -238,7 +251,13 @@ verification:
           truncated: false
         - text: src
           truncated: false
+        - text: tests/conftest.py
+          truncated: false
         - text: tests/test_zhenxun_integration.py
+          truncated: false
+        - text: tests/test_configuration.py
+          truncated: false
+        - text: tests/test_storage.py
           truncated: false
         - text: zhenxun_loader.py
           truncated: false
@@ -250,7 +269,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 197
+      duration_ms: 193
     - id: lock
       name:
         text: lock
@@ -266,7 +285,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 1805
+      duration_ms: 1641
     - id: package
       name:
         text: package
@@ -284,7 +303,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 2776
+      duration_ms: 2523
     - id: wheel-layout
       name:
         text: renamed wheel module layout
@@ -302,13 +321,18 @@ verification:
             n.endswith('/METADATA'))).decode(); assert 'Name:
             zhenxun-plugin-mystool' in metadata; print('Renamed wheel module and
             distribution verified'); assert 'nonebot-adapter-qq' not in
-            metadata.lower(); print('Wheel has no QQ official dependency')"
+            metadata.lower(); print('Wheel has no QQ official dependency');
+            assert any(n.startswith('zhenxun_plugin_mystool/storage/') for n in
+            names); assert
+            any(n.startswith('zhenxun_plugin_mystool/configuration/') for n in
+            names); assert not any('/model/upgrade/' in n for n in names);
+            print('Split storage/configuration packages verified')"
           truncated: false
       argv_truncated: false
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 166
+      duration_ms: 147
     - id: dependency-scope
       name:
         text: QQ removal and supplemental requirements
@@ -344,20 +368,43 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 342
+      duration_ms: 280
+    - id: fresh-storage-readme
+      name:
+        text: No legacy persistence and preserved user README
+        truncated: false
+      argv_display:
+        - text: -c
+          truncated: false
+        - text: from pathlib import Path; import hashlib; root=Path('.'); assert
+            hashlib.sha256((root/'README.md').read_bytes()).hexdigest().upper()=='7321A4B0AF202D600B87BF590D9A2E1941C074B4DCFC0B224E68BC65A01BFA88';
+            src=root/'src/zhenxun_plugin_mystool';
+            contents='\n'.join(p.read_text(encoding='utf-8') for p in
+            src.rglob('*.py'));
+            forbidden=['configV2.json','dataV2.json','plugin_data.json','write_plugin_data','load_plugin_data','qq_guild','blacklist_path','whitelist_path','admin_list_path'];
+            assert not any(word in contents for word in forbidden); assert not
+            list((src/'model/upgrade').glob('*.py')); print('User README
+            preserved; legacy file persistence removed')
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 147
   summary:
-    text: 独立检查A1-A6全部通过。复用本候选六项正式Runtime通过记录，integration为16
-      passed；QQ官方依赖/运行分支/专用命令完全移除，OneBot内容及选择保持，requirements补充一致。未改实现或生产环境。
+    text: 独立只读核对完整A1-A7、当前brief/spec和候选实现；复用本轮绑定7项Runtime checks全部通过，integration日志28
+      passed,25
+      warnings。README未变，数据/配置拆分与事务满足未发布新版本范围，不含迁移。旧索引coverage不足部分直接源读取核验；未把旧索引用于不存在断言。
     truncated: false
   risks:
-    - text: 实际连接OneBot后的消息送达、登录、签到及兑换未执行；本轮仅临时宿主与模拟检查。
+    - text: 运行数据库证据为宿主配置方式的隔离SQLite；PostgreSQL/MySQL及跨进程并发未运行。
       truncated: false
-    - text: 本机Python3.13通过；Python3.10/3.11/3.12和远程CI未执行。
+    - text: 真实Bot送达、米游社账号登录/签到/兑换未运行；没有操作生产数据库或环境。
       truncated: false
-    - text: 图索引仍旧目录，新源码未跟踪；本次结论采用新目录直接源码、差异及绑定Runtime证据。
+    - text: 本机验证Python3.13，现有CI矩阵其他Python版本未实际运行。
       truncated: false
   risks_truncated: false
-  completed_at: 2026-10-14T04:14:05.896Z
+  completed_at: 2026-10-14T07:18:20.204Z
 history:
   - goal_cycle: 1
     iteration: 1
@@ -450,6 +497,35 @@ history:
         passed；QQ官方依赖/运行分支/专用命令完全移除，OneBot内容及选择保持，requirements补充一致。未改实现或生产环境。
       truncated: false
     completed_at: 2026-10-14T04:14:05.896Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 用户要求保留重写的README，今后不修改；将插件文件持久化改为真寻内部数据库及事务，调查配置与业务数据迁移边界。
+      truncated: false
+    completed_at: 2026-10-14T06:41:08.612Z
+  - goal_cycle: 3
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: "Builder handoff Runtime checks failed: integration"
+      truncated: false
+    completed_at: 2026-10-14T07:12:46.781Z
+  - goal_cycle: 3
+    iteration: 2
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 独立只读核对完整A1-A7、当前brief/spec和候选实现；复用本轮绑定7项Runtime checks全部通过，integration日志28
+        passed,25
+        warnings。README未变，数据/配置拆分与事务满足未发布新版本范围，不含迁移。旧索引coverage不足部分直接源读取核验；未把旧索引用于不存在断言。
+      truncated: false
+    completed_at: 2026-10-14T07:18:20.204Z
 history_overflow:
   dropped_entries: 0
   first_dropped_at: null

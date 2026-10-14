@@ -413,48 +413,13 @@ def get_all_bind(user_id: str) -> Iterable[str]:
     return user_id_filter
 
 
-def _read_user_list(path: Path) -> List[str]:
-    """
-    从TEXT读取用户名单
-
-    :return: 名单中的所有用户ID
-    """
-    if not path:
-        return []
-    if os.path.isfile(path):
-        with open(path, "r", encoding=plugin_config.preference.encoding) as f:
-            lines = f.readlines()
-        lines = map(lambda x: x.strip(), lines)
-        line_filter = filter(lambda x: x and x != "\n", lines)
-        return list(line_filter)
-    else:
-        logger.error(f"{plugin_config.preference.log_head}黑/白名单文件 {path} 不存在")
-        return []
-
-
 def read_blacklist() -> List[str]:
-    """
-    读取黑名单
-
-    :return: 黑名单中的所有用户ID
-    """
-    return _read_user_list(plugin_config.preference.blacklist_path) if plugin_config.preference.enable_blacklist else []
+    return plugin_config.preference.blacklist if plugin_config.preference.enable_blacklist else []
 
 
 def read_whitelist() -> List[str]:
-    """
-    读取白名单
-
-    :return: 白名单中的所有用户ID
-    """
-    return _read_user_list(plugin_config.preference.whitelist_path) if plugin_config.preference.enable_whitelist else []
+    return plugin_config.preference.whitelist if plugin_config.preference.enable_whitelist else []
 
 
 def read_admin_list() -> List[str]:
-    """
-    读取白名单
-
-    :return: 管理员名单中的所有用户ID
-    """
-    return _read_user_list(
-        plugin_config.preference.admin_list_path) if plugin_config.preference.enable_admin_list else []
+    return plugin_config.preference.admin_list if plugin_config.preference.enable_admin_list else []

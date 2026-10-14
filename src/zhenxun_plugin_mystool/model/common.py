@@ -3,6 +3,7 @@ import time
 from abc import abstractmethod
 from datetime import datetime
 from pathlib import Path
+from zhenxun.configs.path_config import DATA_PATH
 from typing import Optional, Literal, NamedTuple, no_type_check, Union, Dict, Any, TypeVar, Tuple
 
 import pytz
@@ -18,7 +19,7 @@ __all__ = ["root_path", "data_path", "BaseModelWithSetter", "BaseModelWithUpdate
 root_path = Path(__name__).parent.absolute()
 '''NoneBot2 机器人根目录'''
 
-data_path = root_path / "data" / "nonebot-plugin-mystool"
+data_path = DATA_PATH / "zhenxun_plugin_mystool"
 '''插件数据保存目录'''
 
 

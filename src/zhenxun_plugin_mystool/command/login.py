@@ -1,4 +1,5 @@
 import asyncio
+from ..storage import data_session
 import json
 from typing import Union
 
@@ -32,6 +33,7 @@ CommandRegistry.set_usage(
 
 
 @get_cookie.handle()
+@data_session
 async def handle_first_receive(event: Union[GeneralMessageEvent]):
     user_num = len(set(PluginDataManager.plugin_data.users.values()))  # 由于加入了用户数据绑定功能，可能存在重复的用户数据对象，需要去重
     if plugin_config.preference.enable_blacklist:
@@ -107,7 +109,7 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
                 fp_status, account.device_fp = await get_device_fp(device_id)
                 if fp_status:
                     logger.success(f"用户 {bbs_uid} 成功获取 device_fp: {account.device_fp}")
-                PluginDataManager.write_plugin_data()
+                await PluginDataManager.save()
 
                 if login_status:
                     # 3. 通过 stoken_v2 获取 ltoken
@@ -115,14 +117,14 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
                     if login_status:
                         logger.success(f"用户 {bbs_uid} 成功获取 ltoken: {cookies.ltoken}")
                         account.cookies.update(cookies)
-                        PluginDataManager.write_plugin_data()
+                        await PluginDataManager.save()
 
                     # 4. 通过 stoken_v2 获取 cookie_token
                     login_status, cookies = await get_cookie_token_by_stoken(account.cookies, device_id)
                     if login_status:
                         logger.success(f"用户 {bbs_uid} 成功获取 cookie_token: {cookies.cookie_token}")
                         account.cookies.update(cookies)
-                        PluginDataManager.write_plugin_data()
+                        await PluginDataManager.save()
 
                         logger.success(
                             f"{plugin_config.preference.log_head}米游社账户 {bbs_uid} 绑定成功")
@@ -182,6 +184,7 @@ CommandRegistry.set_usage(
 
 
 @output_cookies.handle()
+@data_session
 async def handle_first_receive(event: Union[GeneralMessageEvent], state: T_State):
     """
     Cookies导出命令触发
@@ -202,6 +205,7 @@ async def handle_first_receive(event: Union[GeneralMessageEvent], state: T_State
 
 
 @output_cookies.got('bbs_uid')
+@data_session
 async def _(event: Union[GeneralPrivateMessageEvent], matcher: Matcher, bbs_uid=ArgStr()):
     """
     根据手机号设置导出相应的账户的Cookies
