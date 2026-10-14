@@ -17,7 +17,7 @@ from ..model import PluginDataManager, plugin_config, UserAccount, UserData, Com
     QueryGameTokenQrCodeStatus, GetCookieStatus
 from ..utils import logger, COMMAND_BEGIN, GeneralMessageEvent, GeneralPrivateMessageEvent, \
     GeneralGroupMessageEvent, \
-    read_blacklist, read_whitelist, generate_device_id, generate_qr_img
+    generate_device_id, generate_qr_img
 
 __all__ = ["get_cookie", "output_cookies"]
 
@@ -36,12 +36,6 @@ CommandRegistry.set_usage(
 @data_session
 async def handle_first_receive(event: Union[GeneralMessageEvent]):
     user_num = len(set(PluginDataManager.plugin_data.users.values()))  # 由于加入了用户数据绑定功能，可能存在重复的用户数据对象，需要去重
-    if plugin_config.preference.enable_blacklist:
-        if event.get_user_id() in read_blacklist():
-            await get_cookie.finish("⚠️您已被加入黑名单，无法使用本功能")
-    elif plugin_config.preference.enable_whitelist:
-        if event.get_user_id() not in read_whitelist():
-            await get_cookie.finish("⚠️您不在白名单内，无法使用本功能")
     if user_num <= plugin_config.preference.max_user or plugin_config.preference.max_user in [-1, 0]:
         # 获取用户数据对象
         user_id = event.get_user_id()

@@ -245,34 +245,3 @@ def test_private_send_failure_is_written_to_host_log(runtime):
     assert files
     assert any("发送私信失败" in path.read_text(encoding="utf-8") for path in files)
     assert not hasattr(common.logger, "add")
-
-
-@pytest.mark.parametrize("prefix", ["米游社", "/custom"])
-def test_friend_welcome_uses_plugin_help_prefix(runtime, prefix):
-    from nonebot.adapters.onebot.v11 import Bot, FriendRequestEvent
-    from zhenxun_plugin_mystool.command import user_check
-    from zhenxun_plugin_mystool.utils.common import CommandBegin
-
-    bot = Bot(nonebot.get_adapters()["OneBot V11"], "test-bot")
-    event = FriendRequestEvent(
-        time=1,
-        self_id=123,
-        post_type="request",
-        request_type="friend",
-        user_id=456,
-        comment="",
-        flag="test-request",
-    )
-    api = AsyncMock()
-    handler = user_check.friendRequest.handlers[0].call
-    with (
-        patch.object(Bot, "call_api", api),
-        patch.object(user_check.asyncio, "sleep", AsyncMock()),
-        patch.object(CommandBegin, "string", prefix),
-        patch.object(user_check.plugin_config.preference, "add_friend_accept", True),
-        patch.object(user_check.plugin_config.preference, "add_friend_welcome", True),
-    ):
-        asyncio.run(handler(bot, event))
-    assert api.await_args_list[0].args == ("set_friend_add_request",)
-    assert api.await_args_list[1].args == ("send_private_msg",)
-    assert f"『{prefix}帮助』" in api.await_args_list[1].kwargs["message"]

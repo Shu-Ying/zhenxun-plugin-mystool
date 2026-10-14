@@ -56,6 +56,7 @@ def runtime(tmp_path_factory):
     driver = nonebot.get_driver()
     driver.register_adapter(Adapter)
     importlib.import_module("zhenxun.services")
+    importlib.import_module("zhenxun.models.level_user")
     loaders = workspace / "external_plugins"
     loaders.mkdir()
     shutil.copyfile(root / "zhenxun_loader.py", loaders / "mystool_loader.py")

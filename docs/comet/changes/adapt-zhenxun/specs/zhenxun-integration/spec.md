@@ -29,11 +29,20 @@ default_value, with type validation appropriate to that field. The host's
 plugin module stores these in data/config.yaml and exposes them to management.
 PREFERENCE and GOOD_LIST_IMAGE_CONFIG grouped dictionaries are removed.
 Explicit host values override defaults. No configV2.json or legacy data/config
-source is read. Access lists use individual configuration list entries rather
-than text-file paths. Invalid values report errors before business operations.
+source is read. Plugin-specific blacklist, whitelist and administrator settings
+and helpers are removed. Interactive access is governed by host ban and plugin
+permission hooks; no separate plugin user allow-list is retained. Invalid values
+report errors before business operations. Automatic friend acceptance defaults
+false and periodic note checks default to 720 minutes.
 Operational configuration is resolved before command registration and job setup.
 Device/salt environment overrides keep their separate role. Startup-bound
 settings require restart; the command prefix remains non-empty by default.
+
+Self-service sign-in and coin tasks retain ordinary user access. Commands that
+target another user or all users require host SUPERUSER or a positive host
+global permission level (LevelUser empty-group scope). A group-specific level
+alone must not grant cross-user account access, including when invoked privately.
+Authorization is checked before looking up a target or executing any account API.
 
 All mutable business state uses registered zhenxun ORM models in the host's
 existing database: user identity/UUID, accounts and cookies, bindings, exchange

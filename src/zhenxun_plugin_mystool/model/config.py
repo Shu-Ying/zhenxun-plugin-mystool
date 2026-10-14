@@ -3,7 +3,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Union, Optional, Tuple, Any, Dict, TYPE_CHECKING
 
-import nonebot
 from pydantic.v1 import BaseModel, BaseSettings, validator
 
 from ..model.common import data_path
@@ -15,19 +14,12 @@ __all__ = ["Preference",
            "GoodListImageConfig", "SaltConfig", "DeviceConfig", "PluginConfig", "PluginEnv", "plugin_config",
            "plugin_env", "zhenxun_configs"]
 
-_driver = nonebot.get_driver()
-
-
 class Preference(BaseModel):
     """
     偏好设置
     """
     github_proxy: Optional[str] = "https://mirror.ghproxy.com/"
     """GitHub加速代理 最终会拼接在原GitHub链接前面"""
-    enable_connection_test: bool = True
-    """是否开启连接测试"""
-    connection_test_interval: Optional[float] = 30
-    """连接测试间隔（单位：秒）"""
     timeout: float = 10
     """网络请求超时时间（单位：秒）"""
     max_retry_times: Optional[int] = 3
@@ -38,29 +30,19 @@ class Preference(BaseModel):
     """兑换时所用的时区"""
     exchange_thread_count: int = 2
     """兑换线程数"""
-    exchange_latency: Tuple[float, float] = (0, 0.5)
-    """同一线程下，每个兑换请求之间的间隔时间"""
-    exchange_duration: float = 5
-    """兑换持续时间随机范围（单位：秒）"""
     log_head: str = ""
     '''日志开头字符串(只有把插件放进plugins目录手动加载时才需要设置)'''
-    plugin_name: str = "zhenxun_plugin_mystool"
-    '''插件名(为模块名字，或于plugins目录手动加载时的目录名)'''
     encoding: str = "utf-8"
     '''文件读写编码'''
     max_user: int = 0
     '''支持最多用户数'''
-    add_friend_accept: bool = True
-    '''是否自动同意好友申请'''
-    add_friend_welcome: bool = True
-    '''用户添加机器人为好友以后，是否发送使用指引信息'''
     command_start: str = ""
     '''插件内部命令头，空值使用米游社；修改后重启生效'''
     sleep_time: float = 2
     '''任务操作冷却时间(如米游币任务)'''
     plan_time: str = "00:30"
     '''每日自动签到和米游社任务的定时任务执行时间，格式为HH:MM'''
-    resin_interval: int = 60
+    resin_interval: int = 720
     '''每次检查原神便笺间隔，单位为分钟'''
     global_geetest: bool = False
     '''是否使用插件配置的全局打码接口，而不是用户个人配置的打码接口，默认关闭'''
@@ -73,18 +55,6 @@ class Preference(BaseModel):
         "challenge": "{challenge}"
     }
     '''极验Geetest人机验证打码API发送的JSON数据 `{gt}`, `{challenge}` 为占位符'''
-    enable_blacklist: bool = False
-    """是否启用用户黑名单"""
-    blacklist: list[str] = []
-    """用户黑名单"""
-    enable_whitelist: bool = False
-    """是否启用用户白名单"""
-    whitelist: list[str] = []
-    """用户白名单"""
-    enable_admin_list: bool = False
-    """是否启用管理员名单"""
-    admin_list: list[str] = []
-    """管理员名单"""
     game_token_app_id: str = "2"
     """米游社二维码登录的应用标识符"""
     qrcode_query_interval: float = 1
@@ -243,13 +213,5 @@ class PluginEnv(BaseSettings):
 from ..configuration import load_config
 
 plugin_config, zhenxun_configs = load_config(PluginConfig)
-
-# TODO: 可能产生 #271 的问题 https://github.com/Ljzd-PRO/nonebot-plugin-mystool/issues/271
-# @_driver.on_startup
-# def _():
-#     """将 ``PluginMetadata.config`` 设为定义的插件配置对象 ``plugin_config``"""
-#     plugin = nonebot.plugin.get_plugin(plugin_config.preference.plugin_name)
-#     plugin.metadata.config = plugin_config
-
 
 plugin_env = PluginEnv()

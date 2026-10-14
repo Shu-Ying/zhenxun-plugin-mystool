@@ -15,14 +15,14 @@ def test_individual_configuration_and_yaml_roundtrip(runtime, tmp_path):
     manager.add_plugin_config(MODULE, "请求超时秒", 31)
     manager.add_plugin_config(MODULE, "命令前缀", "/custom")
     manager.add_plugin_config(MODULE, "每日任务时间", "03:45")
-    manager.add_plugin_config(MODULE, "黑名单", ["123", "456"])
+    manager.add_plugin_config(MODULE, "商品预览图尺寸", [300, 400])
     with patch.object(registry, "Config", manager):
         config, entries = registry.load_config(PluginConfig)
     assert config.preference.timeout == 31
     assert config.preference.command_start == "/custom"
     assert config.preference.plan_time == "03:45"
-    assert config.preference.blacklist == ["123", "456"]
-    assert len(entries) > 30
+    assert config.good_list_image_config.ICON_SIZE == (300, 400)
+    assert len(entries) > 20
     assert all(item.help and item.default_value == item.value for item in entries)
     assert all(
         item.key not in {"PREFERENCE", "GOOD_LIST_IMAGE_CONFIG"} for item in entries
@@ -40,7 +40,25 @@ def test_individual_configuration_and_yaml_roundtrip(runtime, tmp_path):
     assert restored.preference.timeout == 31
     assert restored.preference.command_start == "/custom"
     assert restored.preference.plan_time == "03:45"
-    assert restored.preference.blacklist == ["123", "456"]
+    assert restored.good_list_image_config.ICON_SIZE == (300, 400)
+
+
+def test_host_defaults_and_explicit_overrides(runtime, tmp_path):
+    from zhenxun_plugin_mystool.model.config import PluginConfig
+    from zhenxun_plugin_mystool.configuration import registry
+    from zhenxun_plugin_mystool.configuration.keys import MODULE
+
+    manager = config_manager(tmp_path)
+    with patch.object(registry, "Config", manager):
+        config, entries = registry.load_config(PluginConfig)
+    assert config.preference.resin_interval == 720
+    removed = {"启用黑名单", "黑名单", "启用白名单", "白名单",
+               "启用管理员名单", "管理员名单", "自动接受好友申请", "好友欢迎语"}
+    assert not removed.intersection(item.key for item in entries)
+    manager.set_config(MODULE, "便笺检查间隔分钟", 30)
+    with patch.object(registry, "Config", manager):
+        config, _ = registry.load_config(PluginConfig)
+    assert config.preference.resin_interval == 30
 
 
 @pytest.mark.parametrize("value", ["", "mys"])

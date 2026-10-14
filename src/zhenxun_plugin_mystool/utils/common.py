@@ -32,8 +32,7 @@ __all__ = ["GeneralMessageEvent", "GeneralPrivateMessageEvent", "GeneralGroupMes
            "get_last_command_sep", "COMMAND_BEGIN", "logger", "PLUGIN", "custom_attempt_times",
            "get_async_retry", "generate_device_id", "cookie_str_to_dict", "cookie_dict_to_str", "generate_ds",
            "get_validate", "generate_seed_id", "generate_fp_locally", "get_file", "blur_phone", "generate_qr_img",
-           "send_private_msg", "get_unique_users", "get_all_bind", "read_blacklist", "read_whitelist",
-           "read_admin_list"]
+           "send_private_msg", "get_unique_users", "get_all_bind"]
 
 # 使用真寻消息模块，主动消息按调用方指定的 Bot 或 Adapter 选择目标
 
@@ -87,7 +86,7 @@ PLUGIN = nonebot.plugin.get_plugin_by_module_name(__name__)
 
 if not PLUGIN:
     logger.warning(
-        "插件数据(Plugin)获取失败，如果插件是从本地加载的，需要修改配置文件中 PLUGIN_NAME 为插件目录，否则将导致无法获取插件帮助信息等")
+        "插件数据(Plugin)获取失败，请检查真寻插件加载路径，否则将导致无法获取插件帮助信息等")
 
 
 def custom_attempt_times(retry: bool):
@@ -376,15 +375,3 @@ def get_all_bind(user_id: str) -> Iterable[str]:
     user_id_filter = filter(lambda x: PluginDataManager.plugin_data.user_bind.get(x) == user_id,
                             PluginDataManager.plugin_data.user_bind)
     return user_id_filter
-
-
-def read_blacklist() -> List[str]:
-    return plugin_config.preference.blacklist if plugin_config.preference.enable_blacklist else []
-
-
-def read_whitelist() -> List[str]:
-    return plugin_config.preference.whitelist if plugin_config.preference.enable_whitelist else []
-
-
-def read_admin_list() -> List[str]:
-    return plugin_config.preference.admin_list if plugin_config.preference.enable_admin_list else []

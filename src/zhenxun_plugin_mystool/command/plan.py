@@ -3,7 +3,7 @@ from ..storage import data_session
 import threading
 from typing import Union, Optional, Iterable, Dict
 
-from nonebot import on_command, get_adapters, get_bot
+from nonebot import on_command, get_adapters
 from nonebot.adapters.onebot.v11 import MessageSegment as OneBotV11MessageSegment, Adapter as OneBotV11Adapter, \
     MessageEvent as OneBotV11MessageEvent, GroupMessageEvent as OneBotV11GroupMessageEvent, \
     Bot
@@ -22,7 +22,8 @@ from ..command.exchange import generate_image
 from ..model import (MissionStatus, PluginDataManager, plugin_config, UserData, CommandUsage, GenshinNoteNotice,
                      StarRailNoteNotice)
 from ..utils import get_file, logger, COMMAND_BEGIN, GeneralMessageEvent, send_private_msg, get_all_bind, \
-    get_unique_users, get_validate, read_admin_list
+    get_unique_users, get_validate
+from ..services.permissions import can_manage_accounts
 
 __all__ = [
     "manually_game_sign", "manually_bbs_sign", "manually_genshin_note_check",
@@ -42,11 +43,10 @@ CommandRegistry.set_usage(
 
 @manually_game_sign.handle()
 @data_session
-async def _(event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=CommandArg()):
+async def _(bot: Bot, event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=CommandArg()):
     """
     手动游戏签到函数
     """
-    bot = get_bot()
     user_id = event.get_user_id()
     msgs_list = []
     user = PluginDataManager.plugin_data.users.get(user_id)
@@ -54,8 +54,8 @@ async def _(event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=Com
         await manually_game_sign.finish(f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录", at_sender=True)
     if command_arg:
         if (specified_user_id := str(command_arg)) == "*" or specified_user_id.isdigit():
-            if user_id not in read_admin_list():
-                await manually_game_sign.finish("⚠️你暂无权限执行此操作，只有管理员名单中的用户可以执行此操作")
+            if not await can_manage_accounts(bot, event):
+                await manually_game_sign.finish("⚠️代执行需要真寻超级用户或全局管理员权限")
             else:
                 if specified_user_id == "*":
                     await manually_game_sign.send("⏳开始为所有用户执行游戏签到...")
@@ -101,11 +101,10 @@ CommandRegistry.set_usage(
 
 @manually_bbs_sign.handle()
 @data_session
-async def _(event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=CommandArg()):
+async def _(bot: Bot, event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=CommandArg()):
     """
     手动米游币任务函数
     """
-    bot = get_bot()
     user_id = event.get_user_id()
     user = PluginDataManager.plugin_data.users.get(user_id)
     msgs_list = []
@@ -113,8 +112,8 @@ async def _(event: Union[GeneralMessageEvent], matcher: Matcher, command_arg=Com
         await manually_bbs_sign.finish(f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录", at_sender=True)
     if command_arg:
         if (specified_user_id := str(command_arg)) == "*" or specified_user_id.isdigit():
-            if user_id not in read_admin_list():
-                await manually_bbs_sign.finish("⚠️你暂无权限执行此操作，只有管理员名单中的用户可以执行此操作")
+            if not await can_manage_accounts(bot, event):
+                await manually_bbs_sign.finish("⚠️代执行需要真寻超级用户或全局管理员权限")
             else:
                 if specified_user_id == "*":
                     await manually_bbs_sign.send("⏳开始为所有用户执行米游币任务...")

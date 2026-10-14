@@ -1,40 +1,17 @@
-import asyncio
 from ..storage import data_session
 from typing import Union
 from uuid import uuid4
 
-from nonebot import on_request, on_command
-from nonebot.adapters.onebot.v11 import FriendRequestEvent, GroupRequestEvent, RequestEvent, Bot as OneBotV11Bot
+from nonebot import on_command
 from nonebot.internal.matcher import Matcher
 from nonebot.params import CommandArg, Command
 
 from ..command.common import CommandRegistry
 from ..model import PluginDataManager, plugin_config, uuid4_validate, CommandUsage
-from ..utils import logger, GeneralMessageEvent, COMMAND_BEGIN, get_last_command_sep, \
+from ..utils import GeneralMessageEvent, COMMAND_BEGIN, get_last_command_sep, \
     GeneralGroupMessageEvent
 
-__all__ = ["friendRequest", "user_binding"]
-
-
-friendRequest = on_request(priority=1, block=True)
-
-
-@friendRequest.handle()
-@data_session
-async def _(bot: OneBotV11Bot, event: RequestEvent):
-    # 判断为加好友事件
-    if isinstance(event, FriendRequestEvent):
-        if plugin_config.preference.add_friend_accept:
-            logger.info(f'{plugin_config.preference.log_head}已添加好友{event.user_id}')
-            await bot.set_friend_add_request(flag=event.flag, approve=True)
-            if plugin_config.preference.add_friend_welcome:
-                # 等待腾讯服务器响应
-                await asyncio.sleep(1.5)
-                await bot.send_private_msg(user_id=event.user_id,
-                                           message=f'欢迎使用米游社小助手，请发送『{COMMAND_BEGIN}帮助』查看更多用法哦~')
-    # 判断为邀请进群事件
-    elif isinstance(event, GroupRequestEvent):
-        logger.info(f'{plugin_config.preference.log_head}已加入群聊 {event.group_id}')
+__all__ = ["user_binding"]
 
 
 user_binding = on_command(

@@ -30,8 +30,15 @@ zhenxun message construction and sending, and integrate plugin management.
   consume data. Restore active plans from database on restart.
 - Treat this unreleased version as a fresh schema: remove legacy JSON paths,
   readers/writers, startup upgrade modules and compatibility-only guild fields.
-- User access lists are runtime configuration, managed by individual zhenxun
-  config entries instead of separate blacklist/whitelist/admin text files.
+- Remove plugin-specific blacklist, whitelist and administrator entries and
+  their helpers. Interactive access uses the host's ban/plugin permission hooks.
+  Do not introduce a separate user whitelist; host plugin enable/disable policy
+  replaces the previous plugin-specific allow-list behavior.
+- Cross-user sign-in/coin-task commands allow only host superusers or host global
+  permission administrators (positive level in the global empty-group scope).
+  Group-scoped administrators cannot operate other users' accounts.
+- Default automatic friend acceptance to false and note checks to 720 minutes;
+  explicit host values still override these defaults.
 - Check compatibility with the actual local NoneBot/Pydantic environment.
 - Retain business behavior, command prefixes, OneBot messaging and scheduling
   semantics. Add isolated real-database checks without live account actions.
@@ -61,7 +68,10 @@ requirements documents. No change to zhenxun core is currently proposed.
 - Each configurable setting is separately registered through PluginExtraData
    RegisterConfig entries and round-trips through the host config generation and
    reload with its correct type, help and default. No old grouped dictionaries,
-   configV2.json or access-list text files are read or written.
+   configV2.json or access-list text files are read or written. Plugin-specific
+   access lists are absent; friend acceptance defaults false and note interval
+   defaults 720 minutes. Host permissions protect interactive commands and
+   cross-user operations require superuser/global administrator privileges.
 - Users, accounts, cookies, bindings, exchange plans and per-user settings are
    durably stored in the host database. Fresh initialization and restart restore
    data; transaction failures roll back and concurrency preserves independent
