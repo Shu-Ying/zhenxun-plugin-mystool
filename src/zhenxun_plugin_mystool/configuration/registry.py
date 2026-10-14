@@ -6,6 +6,7 @@ from zhenxun.configs.config import Config
 from zhenxun.configs.utils import RegisterConfig
 
 from .keys import MODULE, DEFAULT_COMMAND_PREFIX, PREFERENCE_KEYS, IMAGE_KEYS
+from .cleanup import remove_retired_configs
 
 
 def field_help(model_type):
@@ -33,6 +34,8 @@ def field_parser(model_type, field):
 
 
 def load_config(config_type):
+    if remove_retired_configs(Config):
+        Config.save()
     defaults = config_type()
     groups = {}
     registrations = []

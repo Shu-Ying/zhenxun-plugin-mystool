@@ -3,7 +3,7 @@ name: adapt-zhenxun
 language: en
 phase: verify
 status: await-user
-state_version: 51
+state_version: 55
 brief: brief.md
 document_constraints_version: 2
 shape_confirmation_hash: a005e6fd332beafd1b22d566a8729a766f0048d170565851274ee29ccae08fde
@@ -19,7 +19,7 @@ workspace:
 loop:
   stage: await-user
   goal_cycle: 4
-  iteration: 1
+  iteration: 2
   attempt: 1
   retry_epoch: 0
   failed_iteration_count: 0
@@ -35,7 +35,7 @@ acceptance:
       management and help generation.
     result: passed
     reason:
-      text: 当前实际加载/metadata隔离测试与源码一致；无SAA或QQ官方依赖，支持OneBot。
+      text: 实际隔离宿主加载与元数据测试及依赖检查通过，无 SAA/官方 QQ 导入。
       truncated: false
   - id: A2
     source: brief.md
@@ -44,7 +44,7 @@ acceptance:
       failure without claiming success.
     result: passed
     reason:
-      text: 文本图片及指定bot/adapter成功/失败测试通过；当前图片缓存目录创建保留。
+      text: 绑定消息、图片和指定适配器测试通过；配置清理不改发送路径及失败契约。
       truncated: false
   - id: A3
     source: brief.md
@@ -53,7 +53,7 @@ acceptance:
       usable.
     result: passed
     reason:
-      text: 命令及帮助均使用非空插件前缀，普通宿主命令未被占用；好友请求匹配器按用户最新授权删除。
+      text: 绑定命令规则和前缀测试通过；清理限定撤销键，不删除命令前缀。
       truncated: false
   - id: A4
     source: brief.md
@@ -67,7 +67,7 @@ acceptance:
       administrator privileges.
     result: passed
     reason:
-      text: 29项逐项RegisterConfig注册，真实宿主YAML往返和720分钟默认/显式覆盖通过；8项名单/好友配置及helpers消失。SUPERUSER或空群全局scope正等级保护跨用户/全部用户操作，真实LevelUser与handler拒绝/允许测试通过；宿主auth_preprocessor统一访问控制。最新用户指令删除好友处理优先，宿主AUTO_ADD_FRIEND默认false满足默认语义。
+      text: 逐项配置和类型测试通过；本轮宿主注册持久化回归证明撤销键删除且有效值/其他插件不变。实际两份宿主配置与备份只差旧分组。好友整项删除遵循用户后续明确授权；间隔720、全局代执行权限测试通过。
       truncated: false
   - id: A5
     source: brief.md
@@ -77,7 +77,7 @@ acceptance:
       independent updates. No business JSON files are created or used.
     result: passed
     reason:
-      text: 当前session深复制、三方merge/宿主事务、生命周期源码及SQLite重启/回滚/并发测试通过，无业务文件持久化。
+      text: 绑定真实临时 SQLite 重启、事务回滚、嵌套隔离及并发测试通过，本轮不改业务存储。
       truncated: false
   - id: A6
     source: brief.md
@@ -85,7 +85,7 @@ acceptance:
       notification switches; focused checks do not contact production accounts.
     result: passed
     reason:
-      text: 每日定时/720分钟便笺调度通过；enable_resin账号开关仍实际读取，模拟网络未操作生产账户。
+      text: 绑定调度和账号开关测试通过，无生产账号请求；旧分组清理不改现有独立定时参数。
       truncated: false
   - id: A7
     source: brief.md
@@ -97,17 +97,15 @@ acceptance:
       the host venv.
     result: passed
     reason:
-      text: README
-        SHA保护正式检查通过；配置审查文档29项默认值/累计13项删除明确；源码与依赖无QQ，当前2.10.4新wheel补充Runtime检查通过，req
-        qrcode/ntplib一致。
+      text: README 校验和依赖、2.10.4 打包检查均通过，清理辅助模块也包含在全源码检查中。
       truncated: false
 builder_handoff:
-  candidate_id: 03525fde-5300-4601-8bdc-b18ef35b176c
+  candidate_id: 8639f735-81e3-4e34-ac8d-fbd28715f0ec
   identity_provider: skill-coordinated
-  builder_execution_ref: skill-coordinated:builder:1230053f-147b-44e8-8263-683d71328b8f
-  iteration: 1
+  builder_execution_ref: skill-coordinated:builder:acfffcfb-fc10-4c5b-86e6-feb0785f0e0a
+  iteration: 2
   summary:
-    text: 按用户确认适配宿主权限：自建6项名单及2项好友配置全部移除；删除好友请求处理器，交给宿主record_request。便笺默认720分钟。SUPERUSER或宿主空群scope正权限等级可代执行；群等级不可跨用户，普通自助保留。docs/configuration-review.md完整29项默认值清单，README原样。
+    text: 修复后台配置残留：注册前定向清除已撤销中文注册字段与旧分组、过滤add_module并保存宿主配置；本机两份配置文件各清理两个旧分组，其他模块值保持不变并备份。全部源码包括cleanup.py接受完整正式检查。
     truncated: false
   addressed_acceptance_ids:
     - A1
@@ -154,6 +152,8 @@ builder_handoff:
         - tests/test_permissions.py
         - tests/test_configuration.py::test_host_defaults_and_explicit_overrides
         - docs/configuration-review.md
+        - src/zhenxun_plugin_mystool/configuration/cleanup.py
+        - tests/test_configuration.py::test_retired_configs_are_removed_from_persisted_host_registry
       note: 29项有效配置独立注册；删除8个插件名单/好友设置。便笺默认720分钟，显式值仍优先；宿主超级用户/全局正等级可代执行，群权限与普通用户被拦截，自己签到任务不受管理员门槛影响。真寻现有封禁/插件钩子负责入口访问，无自建白名单。
     - id: A5
       status: implemented-with-evidence
@@ -201,12 +201,12 @@ builder_handoff:
         全部日志统一进入真寻日志系统，移除自建文件处理器，日志级别和异常信息正确转发。
   checks:
     - name:
-        text: full-isolated-integration
+        text: configuration-cleanup
         truncated: false
       result: passed
       note:
-        text: 58 passed,25warnings；包含真实宿主LevelUser全局/群scope记录、handler
-          API前权限拦截、普通自助、720分钟调度及旧事务/消息测试。
+        text: 8 passed; persisted retired config removal and active/other-module value
+          preservation
         truncated: false
   checks_truncated: false
   known_limits:
@@ -218,7 +218,7 @@ builder_handoff:
       truncated: false
   known_limits_truncated: false
   review: null
-  submitted_at: 2026-10-14T09:45:44.254Z
+  submitted_at: 2026-10-14T10:28:40.531Z
 blockers:
   - owner: user
     reason:
@@ -228,10 +228,10 @@ blockers:
     acceptance_ids: []
     resolution_action: await-user
 verification:
-  candidate_id: 03525fde-5300-4601-8bdc-b18ef35b176c
+  candidate_id: 8639f735-81e3-4e34-ac8d-fbd28715f0ec
   identity_provider: skill-coordinated
-  verifier_execution_ref: skill-coordinated:verifier:afda0b59-79ee-47d1-b501-cc3a6e8c0284
-  iteration: 1
+  verifier_execution_ref: skill-coordinated:verifier:50aff65f-e152-4a15-9c47-1e13d1724062
+  iteration: 2
   attempt: 1
   assurance: skill-coordinated
   verdict: pass
@@ -252,7 +252,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 14587
+      duration_ms: 10332
     - id: syntax
       name:
         text: syntax
@@ -288,7 +288,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 230
+      duration_ms: 170
     - id: lock
       name:
         text: lock
@@ -304,7 +304,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 4413
+      duration_ms: 3511
     - id: package
       name:
         text: package
@@ -322,7 +322,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 3183
+      duration_ms: 2503
     - id: wheel-layout
       name:
         text: renamed wheel module layout
@@ -332,7 +332,7 @@ verification:
           truncated: false
         - text: "import zipfile; from pathlib import Path;
             p=Path(r'C:\\Users\\111\\AppData\\Local\\Temp\\mystool-zhenxun-buil\
-            d-20261014\\zhenxun_plugin_mystool-2.10.1-py3-none-any.whl');
+            d-20261014\\zhenxun_plugin_mystool-2.10.4-py3-none-any.whl');
             z=zipfile.ZipFile(p); names=z.namelist(); assert
             any(n.startswith('zhenxun_plugin_mystool/') for n in names); assert
             not any(n.startswith('nonebot_plugin_mystool/') for n in names);
@@ -351,7 +351,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 210
+      duration_ms: 158
     - id: dependency-scope
       name:
         text: QQ removal and supplemental requirements
@@ -387,7 +387,7 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 345
+      duration_ms: 324
     - id: fresh-storage-readme
       name:
         text: No legacy persistence and preserved user README
@@ -414,49 +414,17 @@ verification:
       cwd_ref: .
       status: passed
       exit_code: 0
-      duration_ms: 180
-    - id: current-wheel-layout
-      name:
-        text: Verify current built 2.10.4 wheel
-        truncated: false
-      argv_display:
-        - text: -c
-          truncated: false
-        - text: "import zipfile; from pathlib import Path;
-            p=Path(r'C:\\Users\\111\\AppData\\Local\\Temp\\mystool-zhenxun-buil\
-            d-20261014\\zhenxun_plugin_mystool-2.10.4-py3-none-any.whl');
-            z=zipfile.ZipFile(p); names=z.namelist(); assert
-            any(n.startswith('zhenxun_plugin_mystool/') for n in names); assert
-            not any(n.startswith('nonebot_plugin_mystool/') for n in names);
-            meta=z.read(next(n for n in names if
-            n.endswith('/METADATA'))).decode(); assert 'Name:
-            zhenxun-plugin-mystool' in meta and 'Version: 2.10.4' in meta;
-            assert 'nonebot-adapter-qq' not in meta.lower(); assert
-            any(n.startswith('zhenxun_plugin_mystool/storage/') for n in names);
-            assert any(n.startswith('zhenxun_plugin_mystool/configuration/') for
-            n in names); assert 'zhenxun_plugin_mystool/services/permissions.py'
-            in names; assert not any('/model/upgrade/' in n for n in names);
-            print('Current 2.10.4 wheel layout and permissions module
-            verified')"
-          truncated: false
-      argv_truncated: false
-      cwd_ref: .
-      status: passed
-      exit_code: 0
-      duration_ms: 188
+      duration_ms: 147
   summary:
-    text: 独立只读核对当前候选A1-A7全部通过，读取全部正式日志（integration58
-      passed）；复用有效检查，仅补充失效旧wheel路径所需的2.10.4新包检查并通过。当前源码明确使用宿主全局权限、无好友请求处理、720分钟默认与账号开关保留。旧索引未追踪/变更文件均直接当前源码核验，未改源码或README，无生产操作。
+    text: 全部A1-A7通过，复用本候选7项Runtime通过证据并独立核对清理语义；本机两份YAML精确删除旧配置且保留其他值，运行中WebUI需更新部署重启。
     truncated: false
   risks:
-    - text: 真实Bot及生产米游社账户未执行；SQLite之外数据库及Python3.10至3.12/远程CI未执行。
+    - text: 生产 Bot 当前内存配置及 WebUI 未直接操作；更新部署并重启后才能刷新菜单，旧部署仍可能重新注册旧分组。
       truncated: false
-    - text: 正式brief/spec仍采用“好友接受默认false”旧措辞，最新用户明确删除插件处理；当前配置审查文档已说明整项删除并由宿主AUTO_ADD_FRIEND控制，按最新授权验收。
-      truncated: false
-    - text: 原wheel-layout检查固定旧2.10.1临时包，未作为当前包证据；已补充current-wheel-layout正式检查确认新2.10.4包。
+    - text: 数据库验证仅临时 SQLite，其他数据库与生产米游社账号、实际联网消息未运行。
       truncated: false
   risks_truncated: false
-  completed_at: 2026-10-14T09:50:44.669Z
+  completed_at: 2026-10-14T10:33:52.216Z
 history:
   - goal_cycle: 1
     iteration: 1
@@ -649,6 +617,24 @@ history:
         passed）；复用有效检查，仅补充失效旧wheel路径所需的2.10.4新包检查并通过。当前源码明确使用宿主全局权限、无好友请求处理、720分钟默认与账号开关保留。旧索引未追踪/变更文件均直接当前源码核验，未改源码或README，无生产操作。
       truncated: false
     completed_at: 2026-10-14T09:50:44.669Z
+  - goal_cycle: 4
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 用户要求清除WebUI已删除配置残留，修复插件加载时清理旧注册记录并定向清理本机缓存配置，不动其他插件和值。
+      truncated: false
+    completed_at: 2026-10-14T10:26:21.317Z
+  - goal_cycle: 4
+    iteration: 2
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 全部A1-A7通过，复用本候选7项Runtime通过证据并独立核对清理语义；本机两份YAML精确删除旧配置且保留其他值，运行中WebUI需更新部署重启。
+      truncated: false
+    completed_at: 2026-10-14T10:33:52.216Z
 history_overflow:
   dropped_entries: 0
   first_dropped_at: null
