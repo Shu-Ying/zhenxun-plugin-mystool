@@ -2,8 +2,9 @@ from contextlib import asynccontextmanager
 import asyncio
 from contextvars import ContextVar
 from functools import wraps
+from copy import deepcopy
 
-from nonebot.log import logger
+from ..logging import logger
 from zhenxun.utils.manager.priority_manager import PriorityLifecycle
 
 from .codec import encode, decode
@@ -16,8 +17,8 @@ _ready = asyncio.Event()
 class DataSession:
     def __init__(self, records):
         self.owner = asyncio.current_task()
-        self.base = records
-        self.data = decode(records)
+        self.base = deepcopy(records)
+        self.data = decode(deepcopy(records))
 
     async def save(self):
         try:
@@ -26,10 +27,10 @@ class DataSession:
                 return
             await Repository.commit(self.base, pending)
         except Exception as error:
-            self.data = decode(self.base)
+            self.data = decode(deepcopy(self.base))
             logger.error(f"mystool 数据库事务未提交：{type(error).__name__}")
             raise
-        self.base = pending
+        self.base = deepcopy(pending)
 
 
 class ManagerMeta(type):

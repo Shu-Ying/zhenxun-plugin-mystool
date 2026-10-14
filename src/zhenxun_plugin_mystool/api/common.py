@@ -609,7 +609,7 @@ async def get_good_detail(good: Union[Good, str], retry: bool = True) -> Tuple[G
                     res = await client.get(URL_CHECK_GOOD.format(good_id), timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 # -2109 商品不存在；-2105 商品已下架
-                if api_result.retcode == -2109 or api_result.message == -2105:
+                if api_result.retcode in (-2109, -2105):
                     return GetGoodDetailStatus(good_not_existed=True), None
                 if isinstance(good, Good):
                     return GetGoodDetailStatus(success=True), good.update(api_result.data)

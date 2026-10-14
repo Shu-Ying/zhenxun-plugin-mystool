@@ -26,6 +26,7 @@ def example_user():
     )
     good = Good(
         type=0,
+        next_time=9999999999,
         goods_id="test-good",
         price=10,
         icon="https://example.invalid/image",
@@ -248,7 +249,9 @@ def test_restart_restores_jobs_from_database(runtime):
             patch.object(
                 exchange_jobs,
                 "get_good_detail",
-                AsyncMock(return_value=(True, SimpleNamespace(time=9999999999))),
+                AsyncMock(
+                    return_value=(True, next(iter(example_user().exchange_plans)).good)
+                ),
             ),
             patch.object(exchange_jobs, "schedule_plan") as schedule,
         ):
@@ -347,5 +350,129 @@ def test_deleted_plan_is_not_exchanged(runtime):
                 None,
             )
         exchange.assert_not_called()
+
+    runtime.run(check())
+
+
+def test_nested_settings_are_saved_and_rollback_remains_isolated(runtime):
+    from zhenxun_plugin_mystool.storage import PluginDataManager
+    from zhenxun_plugin_mystool.storage.repository import Repository
+    from zhenxun_plugin_mystool.model.data import UserData
+
+    async def check():
+        async with PluginDataManager.session():
+            PluginDataManager.plugin_data.users["owner"] = UserData(
+                geetest_params={"nested": {"values": [1]}}
+            )
+            await PluginDataManager.save()
+        async with PluginDataManager.session() as session:
+            session.data.users["owner"].geetest_params["nested"]["values"][0] = 2
+            assert session.base["users"]["owner"]["geetest_params"]["nested"][
+                "values"
+            ] == [1]
+            await PluginDataManager.save()
+        async with PluginDataManager.session() as session:
+            assert session.data.users["owner"].geetest_params["nested"]["values"] == [2]
+            session.data.users["owner"].geetest_params["nested"]["values"][0] = 3
+            with (
+                patch.object(
+                    Repository, "commit", AsyncMock(side_effect=RuntimeError("fail"))
+                ),
+                pytest.raises(RuntimeError),
+            ):
+                await PluginDataManager.save()
+            assert session.data.users["owner"].geetest_params["nested"]["values"] == [2]
+            session.data.users["owner"].geetest_params["nested"]["values"][0] = 4
+            assert session.base["users"]["owner"]["geetest_params"]["nested"][
+                "values"
+            ] == [2]
+            await PluginDataManager.save()
+        async with PluginDataManager.session():
+            assert PluginDataManager.plugin_data.users["owner"].geetest_params[
+                "nested"
+            ]["values"] == [4]
+
+    runtime.run(check())
+
+
+@pytest.mark.parametrize("error_kind", ["network_error", "incorrect_return"])
+def test_temporary_lookup_failure_preserves_and_restores_plan(runtime, error_kind):
+    from zhenxun_plugin_mystool.services import exchange_jobs
+    from zhenxun_plugin_mystool.storage import PluginDataManager
+    from zhenxun_plugin_mystool.model.common import GetGoodDetailStatus
+
+    async def check():
+        await seed()
+        with (
+            patch.object(
+                exchange_jobs,
+                "get_good_detail",
+                AsyncMock(
+                    return_value=(GetGoodDetailStatus(**{error_kind: True}), None)
+                ),
+            ),
+            patch.object(exchange_jobs, "schedule_plan") as schedule,
+        ):
+            await exchange_jobs.restore_exchange_jobs()
+        schedule.assert_called_once()
+        async with PluginDataManager.session():
+            assert len(PluginDataManager.plugin_data.users["owner"].exchange_plans) == 1
+
+    runtime.run(check())
+
+
+@pytest.mark.parametrize("reason", ["not_found", "expired"])
+def test_confirmed_invalid_plans_are_deleted(runtime, reason):
+    from zhenxun_plugin_mystool.services import exchange_jobs
+    from zhenxun_plugin_mystool.storage import PluginDataManager
+    from zhenxun_plugin_mystool.model.common import GetGoodDetailStatus
+
+    async def check():
+        await seed()
+        good = next(iter(example_user().exchange_plans)).good
+        good.next_time = 1
+        result = (
+            (GetGoodDetailStatus(good_not_existed=True), None)
+            if reason == "not_found"
+            else (GetGoodDetailStatus(success=True), good)
+        )
+        with (
+            patch.object(
+                exchange_jobs, "get_good_detail", AsyncMock(return_value=result)
+            ),
+            patch.object(exchange_jobs, "schedule_plan") as schedule,
+        ):
+            await exchange_jobs.restore_exchange_jobs()
+        schedule.assert_not_called()
+        async with PluginDataManager.session():
+            assert not PluginDataManager.plugin_data.users["owner"].exchange_plans
+
+    runtime.run(check())
+
+
+def test_updated_plan_time_is_persisted_and_scheduled(runtime):
+    from zhenxun_plugin_mystool.services import exchange_jobs
+    from zhenxun_plugin_mystool.storage import PluginDataManager
+    from zhenxun_plugin_mystool.model.common import GetGoodDetailStatus
+
+    async def check():
+        await seed()
+        good = next(iter(example_user().exchange_plans)).good
+        good.next_time = 8888888888
+        lookup = AsyncMock(return_value=(GetGoodDetailStatus(success=True), good))
+        with (
+            patch.object(exchange_jobs, "get_good_detail", lookup),
+            patch.object(exchange_jobs, "schedule_plan") as schedule,
+        ):
+            await exchange_jobs.restore_exchange_jobs()
+        lookup.assert_awaited_once_with("test-good")
+        assert schedule.call_args.args[1].good.time == 8888888888
+        async with PluginDataManager.session():
+            assert (
+                next(
+                    iter(PluginDataManager.plugin_data.users["owner"].exchange_plans)
+                ).good.time
+                == 8888888888
+            )
 
     runtime.run(check())

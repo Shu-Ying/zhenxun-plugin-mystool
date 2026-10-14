@@ -61,4 +61,4 @@ jobs:
         run: poetry run pip install -e .host/zhenxun_bot
       - name: Test Plugin
         run: |
-          poetry run python -m pytest tests/test_zhenxun_integration.py tests/test_configuration.py tests/test_storage.py -q
+          poetry run python -m pytest tests/test_zhenxun_integration.py tests/test_configuration.py tests/test_storage.py tests/test_logging.py -q

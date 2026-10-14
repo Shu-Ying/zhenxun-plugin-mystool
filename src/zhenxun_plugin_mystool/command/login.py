@@ -115,14 +115,14 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
                     # 3. 通过 stoken_v2 获取 ltoken
                     login_status, cookies = await get_ltoken_by_stoken(account.cookies, device_id)
                     if login_status:
-                        logger.success(f"用户 {bbs_uid} 成功获取 ltoken: {cookies.ltoken}")
+                        logger.success(f"用户 {bbs_uid} 成功获取 ltoken")
                         account.cookies.update(cookies)
                         await PluginDataManager.save()
 
                     # 4. 通过 stoken_v2 获取 cookie_token
                     login_status, cookies = await get_cookie_token_by_stoken(account.cookies, device_id)
                     if login_status:
-                        logger.success(f"用户 {bbs_uid} 成功获取 cookie_token: {cookies.cookie_token}")
+                        logger.success(f"用户 {bbs_uid} 成功获取 cookie_token")
                         account.cookies.update(cookies)
                         await PluginDataManager.save()
 

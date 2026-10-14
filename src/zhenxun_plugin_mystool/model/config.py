@@ -1,11 +1,9 @@
-import os
 import sys
-from datetime import time, timedelta, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Union, Optional, Tuple, Any, Dict, TYPE_CHECKING
 
 import nonebot
-from nonebot.log import logger
 from pydantic.v1 import BaseModel, BaseSettings, validator
 
 from ..model.common import data_path
@@ -44,14 +42,8 @@ class Preference(BaseModel):
     """同一线程下，每个兑换请求之间的间隔时间"""
     exchange_duration: float = 5
     """兑换持续时间随机范围（单位：秒）"""
-    enable_log_output: bool = True
-    """是否保存日志"""
     log_head: str = ""
     '''日志开头字符串(只有把插件放进plugins目录手动加载时才需要设置)'''
-    log_path: Optional[Path] = data_path / "mystool.log"
-    """日志保存路径"""
-    log_rotation: Union[str, int, time, timedelta] = "1 week"
-    '''日志保留时长(需要按照格式设置)'''
     plugin_name: str = "zhenxun_plugin_mystool"
     '''插件名(为模块名字，或于plugins目录手动加载时的目录名)'''
     encoding: str = "utf-8"
@@ -113,21 +105,6 @@ class Preference(BaseModel):
         if value <= 0:
             raise ValueError("此配置必须大于零")
         return value
-
-    @validator("log_path", allow_reuse=True)
-    def _(cls, v: Optional[Path]):
-        if v is None:
-            return v
-        absolute_path = v.absolute()
-        if not os.path.exists(absolute_path) or not os.path.isfile(absolute_path):
-            absolute_parent = absolute_path.parent
-            try:
-                os.makedirs(absolute_parent, exist_ok=True)
-            except PermissionError:
-                logger.warning(f"程序没有创建日志目录 {absolute_parent} 的权限")
-        elif not os.access(absolute_path, os.W_OK):
-            logger.warning(f"程序没有写入日志文件 {absolute_path} 的权限")
-        return v
 
     @property
     def notice_time(self) -> bool:

@@ -376,6 +376,7 @@ def image_process(game: str, _lock: Lock = None):
             return False
         date = time.strftime('%m-%d', time.localtime())
         path = plugin_config.good_list_image_config.SAVE_PATH / f"{date}-{game}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'wb') as f:
             f.write(image_bytes)
         logger.info(f"{plugin_config.preference.log_head}已完成 {game} 分区的商品列表图片生成")

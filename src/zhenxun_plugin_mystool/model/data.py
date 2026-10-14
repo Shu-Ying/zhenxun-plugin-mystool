@@ -3,7 +3,7 @@ from typing import Union, Optional, Any, Dict, TYPE_CHECKING, AbstractSet, \
 from uuid import UUID, uuid4
 
 from httpx import Cookies
-from nonebot.log import logger
+from ..logging import logger
 from pydantic.v1 import BaseModel, validator
 
 from .._version import __version__

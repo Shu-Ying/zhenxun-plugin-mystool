@@ -14,7 +14,6 @@ from zhenxun.configs.utils import Command, PluginExtraData
 
 _command_begin += plugin_config.preference.command_start
 
-__version__ = _version.__version__
 __plugin_meta__ = PluginMetadata(
     name="米游社小助手插件\n",
     description="米游社工具-每日米游币任务、游戏签到、商品兑换、免抓包登录\n",
@@ -39,8 +38,8 @@ __plugin_meta__ = PluginMetadata(
     f"\n🔍 {_command_begin}帮助 <功能名> ➢ 查看目标功能详细说明"
     "\n\n⚠️你的数据将经过机器人服务器，请确定你信任服务器所有者再使用。",
     extra=PluginExtraData(
-        author="Ljzd-PRO / Everything0519",
-        version=__version__,
+        author="Shu-Ying",
+        version=_version.__version__,
         menu_type="米游社",
         commands=[Command(command=plugin_config.preference.command_start + name)
                   for name in ("登录", "地址", "签到", "任务", "兑换", "商品",

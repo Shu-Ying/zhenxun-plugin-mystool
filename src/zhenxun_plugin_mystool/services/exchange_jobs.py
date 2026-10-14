@@ -129,10 +129,32 @@ async def restore_exchange_jobs():
         if user_id in PluginDataManager.plugin_data.user_bind:
             continue
         for plan in list(user.exchange_plans):
-            status, good = await get_good_detail(plan.good)
-            if not status or not good.time or good.time < time.time():
+            status, good = await get_good_detail(plan.good.goods_id)
+            if not status:
+                if getattr(status, "good_not_existed", False):
+                    user.exchange_plans.remove(plan)
+                else:
+                    logger.warning(
+                        "商品查询失败，保留数据库兑换计划",
+                        session=user_id,
+                        target=plan.good.goods_id,
+                    )
+                    if plan.good.time and plan.good.time >= time.time():
+                        schedules.append((user_id, plan))
+                continue
+            if good is None:
+                logger.warning(
+                    "商品查询未返回详情，保留兑换计划",
+                    session=user_id,
+                    target=plan.good.goods_id,
+                )
+                continue
+            if not good.time or good.time < time.time():
                 user.exchange_plans.remove(plan)
             else:
+                user.exchange_plans.remove(plan)
+                plan.good = good
+                user.exchange_plans.add(plan)
                 schedules.append((user_id, plan))
     await PluginDataManager.save()
     for user_id, plan in schedules:

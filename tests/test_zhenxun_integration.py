@@ -222,37 +222,29 @@ def test_verification_prompt_uses_configured_prefix(runtime):
     assert "『/账号设置』" not in send.call_args.kwargs["message"]
 
 
-def test_private_send_failure_is_written_to_plugin_log(runtime, tmp_path):
+def test_private_send_failure_is_written_to_host_log(runtime):
     from nonebot.adapters.onebot.v11 import Bot
     from zhenxun_plugin_mystool.utils import common
+    from zhenxun_plugin_mystool import logging as plugin_log
+    from zhenxun.configs.path_config import LOG_PATH
 
     bot = Bot(nonebot.get_adapters()["OneBot V11"], "test-bot")
-    path = tmp_path / "mystool.log"
-    sink_ids = []
-    add_sink = common.logger.add
-
-    def capture_sink(*args, **kwargs):
-        sink_id = add_sink(*args, **kwargs)
-        sink_ids.append(sink_id)
-        return sink_id
-
-    try:
-        with (
-            patch.object(common.plugin_config.preference, "log_path", path),
-            patch.object(common.plugin_config.preference, "log_head", ""),
-            patch.object(common.logger, "add", side_effect=capture_sink),
-            patch.object(
-                common.PlatformUtils,
-                "send_message",
-                AsyncMock(side_effect=RuntimeError("test-failure")),
-            ),
-        ):
-            common.set_logger(common.logger)
-            assert not asyncio.run(common.send_private_msg("123", "hello", use=bot))[0]
-        assert "发送私信失败" in path.read_text(encoding="utf-8")
-    finally:
-        for sink_id in sink_ids:
-            common.logger.remove(sink_id)
+    with (
+        patch.object(
+            plugin_log._host_logger, "error", wraps=plugin_log._host_logger.error
+        ) as error,
+        patch.object(
+            common.PlatformUtils,
+            "send_message",
+            AsyncMock(side_effect=RuntimeError("test-failure")),
+        ),
+    ):
+        assert not asyncio.run(common.send_private_msg("123", "hello", use=bot))[0]
+    assert error.call_args.args[1] == "米游社"
+    files = list(LOG_PATH.glob("error_*.log"))
+    assert files
+    assert any("发送私信失败" in path.read_text(encoding="utf-8") for path in files)
+    assert not hasattr(common.logger, "add")
 
 
 @pytest.mark.parametrize("prefix", ["米游社", "/custom"])

@@ -1,27 +1,19 @@
 import hashlib
 import io
 import json
-import os
 import random
 import string
 import time
 import uuid
 from copy import deepcopy
-from pathlib import Path
 from typing import (Dict, Literal,
                     Union, Optional, Tuple, Iterable, List)
 from urllib.parse import urlencode
 
 import httpx
-import nonebot.log
 import nonebot.plugin
 import tenacity
 
-try:
-    from loguru import Logger
-except ImportError:
-    Logger = None
-    pass
 
 from nonebot import Adapter, Bot
 
@@ -31,14 +23,13 @@ from zhenxun.utils.platform import PlatformUtils
 
 from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, PrivateMessageEvent, GroupMessageEvent, \
     Bot as OneBotV11Bot
-from nonebot.log import logger
-from nonebot.log import logger
+from ..logging import logger
 from qrcode import QRCode
 
 from ..model import GeetestResult, PluginDataManager, Preference, plugin_config, plugin_env, UserData
 
 __all__ = ["GeneralMessageEvent", "GeneralPrivateMessageEvent", "GeneralGroupMessageEvent", "CommandBegin",
-           "get_last_command_sep", "COMMAND_BEGIN", "set_logger", "logger", "PLUGIN", "custom_attempt_times",
+           "get_last_command_sep", "COMMAND_BEGIN", "logger", "PLUGIN", "custom_attempt_times",
            "get_async_retry", "generate_device_id", "cookie_str_to_dict", "cookie_dict_to_str", "generate_ds",
            "get_validate", "generate_seed_id", "generate_fp_locally", "get_file", "blur_phone", "generate_qr_img",
            "send_private_msg", "get_unique_users", "get_all_bind", "read_blacklist", "read_whitelist",
@@ -90,32 +81,6 @@ COMMAND_BEGIN = CommandBegin()
 '''命令开头字段（包括例如'/'和插件命令起始字段例如'mystool'）'''
 
 
-def set_logger(_logger: "Logger"):
-    """
-    给日志记录器对象增加输出到文件的Handler
-    """
-    if not plugin_config.preference.enable_log_output or plugin_config.preference.log_path is None:
-        return _logger
-    plugin_package = __name__.split(".utils", 1)[0]
-    # 根据"name"筛选日志，如果在 plugins 目录加载，则通过 LOG_HEAD 识别
-    # 如果不是插件输出的日志，但是与插件有关，则也进行保存
-    logger.add(
-        plugin_config.preference.log_path,
-        diagnose=False,
-        format=nonebot.log.default_format,
-        rotation=plugin_config.preference.log_rotation,
-        filter=lambda x: x["name"] == plugin_package or (
-                x["name"] or ""
-        ).startswith(plugin_package + ".") or x["name"] == plugin_config.preference.plugin_name or (
-                plugin_config.preference.log_head != "" and x["message"].find(plugin_config.preference.log_head) == 0
-        ) or x["message"].find(f"plugins.{plugin_config.preference.plugin_name}") != -1
-    )
-
-    return logger
-
-
-logger = set_logger(logger)
-"""本插件所用日志记录器对象（包含输出到文件）"""
 
 PLUGIN = nonebot.plugin.get_plugin_by_module_name(__name__)
 '''本插件数据'''
