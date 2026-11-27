@@ -39,9 +39,13 @@ def encode(data):
                 field for field in ("community_nickname", "web_scanned_at")
                 if getattr(account, field) is None
             }
+            if not account.game_sign_roles:
+                exclude.add("game_sign_roles")
             records["accounts"][(user_id, uid)] = json.loads(account.json(exclude=exclude))
         for plan in user.exchange_plans:
             payload = json.loads(plan.json(exclude={"account", "legacy_plan_id"}))
+            if plan.generation is None:
+                payload.pop("generation", None)
             payload["bbs_uid"] = plan.account.bbs_uid
             records["plans"][(user_id, plan_key(plan))] = payload
     validate(records)

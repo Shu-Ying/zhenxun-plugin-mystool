@@ -28,8 +28,6 @@ class Preference(BaseModel):
     """网络请求重试间隔（单位：秒）（除兑换请求外）"""
     timezone: Optional[str] = "Asia/Shanghai"
     """兑换时所用的时区"""
-    exchange_thread_count: int = 2
-    """兑换线程数"""
     log_head: str = ""
     '''日志开头字符串(只有把插件放进plugins目录手动加载时才需要设置)'''
     encoding: str = "utf-8"
@@ -69,8 +67,7 @@ class Preference(BaseModel):
             raise ValueError("每日任务时间必须为 HH:MM")
         return value
 
-    @validator("timeout", "qrcode_query_interval", "qrcode_wait_time", "resin_interval",
-               "exchange_thread_count", allow_reuse=True)
+    @validator("timeout", "qrcode_query_interval", "qrcode_wait_time", "resin_interval", allow_reuse=True)
     def validate_positive(cls, value):
         if value <= 0:
             raise ValueError("此配置必须大于零")

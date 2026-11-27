@@ -2,21 +2,29 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 
+from nonebot import get_driver
+from nonebot.adapters.onebot.v11 import ActionFailed
+from nonebot_plugin_apscheduler import scheduler
 from pytz import timezone
 
 from ..model.data import UserAccount
 from ..storage.repository import Repository
 from ..utils import COMMAND_BEGIN, logger, send_private_msg
+from ..utils.common import PrivateMessageUnavailable
 
 
 WEB_TOKEN_ESTIMATED_DAYS = 30
 _SHANGHAI = timezone("Asia/Shanghai")
 
 
+def _estimated_web_expiry(scanned_at: int):
+    return datetime.fromtimestamp(scanned_at, _SHANGHAI).date() + timedelta(days=WEB_TOKEN_ESTIMATED_DAYS)
+
+
 def web_token_expiry_notice(web_scanned_at: int | None, *, just_scanned: bool = False) -> str:
     if web_scanned_at is None:
         return "🔔网页 Token 到期日尚未记录，完成一次 Web 扫码后会显示。"
-    expiry = datetime.fromtimestamp(web_scanned_at, _SHANGHAI).date() + timedelta(days=WEB_TOKEN_ESTIMATED_DAYS)
+    expiry = _estimated_web_expiry(web_scanned_at)
     date = expiry.strftime("%Y年%m月%d日")
     if just_scanned:
         return f"🔔网页 Token 预计约 {WEB_TOKEN_ESTIMATED_DAYS} 天后过期（{date}），届时请重新扫描网页二维码。"
@@ -150,3 +158,72 @@ class CredentialExpiry:
                 delivered = False
             if not delivered:
                 await Repository.update(lambda records: release(records, user_id))
+
+
+def _estimate_due(account, today):
+    if account.web_scanned_at is None or not account.cookies.has_credentials("web"):
+        return False
+    version = credential_fingerprint(account, "web")
+    if account.expired_credentials.get("web") == version:
+        return False
+    return 0 <= (_estimated_web_expiry(account.web_scanned_at) - today).days <= 3
+
+
+def _estimate_recipients(records, owner):
+    settings = records["users"].get(owner)
+    if settings is None or not settings.get("enable_notice", True):
+        return []
+    return [owner, *(source for source, target in records["bindings"].items() if target == owner)]
+
+
+async def send_estimated_web_expiry_reminders(*, today=None):
+    today = today or datetime.now(_SHANGHAI).date()
+    records = await Repository.load()
+    for (owner, uid), raw in records["accounts"].items():
+        account = UserAccount.parse_obj(raw)
+        if not _estimate_due(account, today):
+            continue
+        expiry = CredentialExpiry(owner, account)
+        version = credential_fingerprint(account, "web")
+
+        def claim(latest, recipient):
+            raw_current = expiry._current_account(latest, "web", version)
+            if raw_current is None or recipient not in _estimate_recipients(latest, owner):
+                return False
+            if not _estimate_due(UserAccount.parse_obj(raw_current), today):
+                return False
+            sent = raw_current.setdefault("credential_expiry_notices", {}).setdefault("web_estimate", [])
+            if recipient in sent:
+                return False
+            sent.append(recipient)
+            return True
+
+        def release(latest, recipient):
+            raw_current = expiry._current_account(latest, "web", version)
+            if raw_current is not None:
+                sent = raw_current.get("credential_expiry_notices", {}).get("web_estimate", [])
+                if recipient in sent:
+                    sent.remove(recipient)
+
+        for recipient in _estimate_recipients(records, owner):
+            if not await Repository.update(lambda latest: claim(latest, recipient)):
+                continue
+            message = (f"账户 {account.display_name}\n{web_token_expiry_notice(account.web_scanned_at)}\n"
+                       f"到期后请私聊发送「{COMMAND_BEGIN}登录 Web」续登。")
+            try:
+                delivered, error = await send_private_msg(user_id=recipient, message=message)
+            except Exception as exc:
+                logger.warning(f"网页凭据提醒发送结果无法确认：{type(exc).__name__}")
+                continue
+            if not delivered and isinstance(error, (ActionFailed, PrivateMessageUnavailable)):
+                await Repository.update(lambda latest: release(latest, recipient))
+
+
+@scheduler.scheduled_job("interval", minutes=15, id="mystool-web-expiry-reminder")
+async def check_web_expiry_reminders():
+    await send_estimated_web_expiry_reminders()
+
+
+@get_driver().on_bot_connect
+async def _check_web_expiry_on_connect():
+    await send_estimated_web_expiry_reminders()

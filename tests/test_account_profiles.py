@@ -146,7 +146,7 @@ def test_decoded_accounts_disambiguate_collisions_without_changing_stored_json(m
         account = models.UserAccount(
             cookies={"stuid": uid}, device_id_android=DEVICE_ID, community_nickname=nickname,
         )
-        stored = json.loads(account.json(exclude={"web_scanned_at"}))
+        stored = json.loads(account.json(exclude={"web_scanned_at", "game_sign_roles"}))
         if nickname is None:
             stored.pop("community_nickname")
         records["accounts"][owner, uid] = stored

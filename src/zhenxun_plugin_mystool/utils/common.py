@@ -314,6 +314,10 @@ def generate_qr_img(data: str):
     return image_bytes.getvalue()
 
 
+class PrivateMessageUnavailable(RuntimeError):
+    pass
+
+
 async def send_private_msg(
         user_id: str,
         message: Union[str, UniMessage],
@@ -355,7 +359,7 @@ async def send_private_msg(
             return False, e
         else:
             return True, None
-    return False, RuntimeError("没有可用的受支持 Bot")
+    return False, PrivateMessageUnavailable("没有可用的受支持 Bot")
 
 
 def get_unique_users() -> Iterable[Tuple[str, UserData]]:

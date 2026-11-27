@@ -96,7 +96,7 @@ def write_login(
             cookies=BBSCookies.parse_obj(cookies), device_id_ios=device_id,
             device_id_android=generate_device_id(), device_fp=device_fp,
         )
-        record = json.loads(account.json(exclude={"community_nickname", "web_scanned_at"}))
+        record = json.loads(account.json(exclude={"community_nickname", "web_scanned_at", "game_sign_roles"}))
     else:
         record["cookies"] = cookies
         if app and (device_fp or device_id != record.get("device_id_ios")):
@@ -114,6 +114,8 @@ def write_login(
             versions[family] = versions.get(family, 0) + 1
             expired.pop(family, None)
             notices.pop(family, None)
+            if family == "web":
+                notices.pop("web_estimate", None)
     record["credential_expiry_notices"] = {
         family: recipients for family, recipients in notices.items() if not family.startswith("combined:")
     }

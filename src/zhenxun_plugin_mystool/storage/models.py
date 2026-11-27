@@ -51,3 +51,18 @@ class MystoolRevision(Model):
 
     class Meta:
         table = "mystool_revision"
+
+
+class MystoolExchangeExecution(Model):
+    key = fields.CharField(64, pk=True)
+    owner_id = fields.CharField(255, index=True)
+    plan_id = fields.CharField(64)
+    generation = fields.CharField(32, null=True)
+    scheduled_at = fields.BigIntField()
+    account_label = fields.CharField(255)
+    goods_name = fields.TextField()
+    outcome = fields.CharField(16, default="unknown")
+    acknowledged = fields.BooleanField(default=False)
+
+    class Meta:
+        table = "mystool_exchange_execution"

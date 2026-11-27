@@ -304,6 +304,7 @@ class UserAccount(BaseModelWithSetter):
         "ZenlessZoneZero"
     ]
     '''允许签到的游戏列表'''
+    game_sign_roles: Dict[str, List[tuple[str, str]]] = {}
     mission_games: List[str] = ["BBSMission"]
     '''在哪些板块执行米游币任务计划 为 BaseMission 子类名称'''
     user_stamina_threshold: int = 240
@@ -378,7 +379,8 @@ class ExchangePlan(BaseModel):
     """商品对应的游戏的玩家账号"""
     scheduled_at: Optional[int] = None
     """创建计划时选定的兑换场次时间戳"""
-    paused_reason: Optional[Literal["schedule_unconfirmed", "schedule_passed"]] = None
+    paused_reason: Optional[Literal["schedule_unconfirmed", "schedule_passed", "target_unconfirmed"]] = None
+    generation: Optional[str] = None
     legacy_plan_id: Optional[str] = None
     """无法恢复原场次时，沿用数据库中原有的计划 ID"""
 
@@ -399,7 +401,10 @@ class ExchangePlan(BaseModel):
     @property
     def identity(self):
         goods_id, address_id, account_id, role_id = self.redemption_target
-        return goods_id, self.legacy_plan_id or self.scheduled_at, address_id, account_id, role_id
+        slot = self.legacy_plan_id or self.scheduled_at
+        if self.generation is not None and self.good.is_virtual and self.game_record is not None:
+            return goods_id, slot, account_id, self.game_record.game_id, self.game_record.region, role_id
+        return goods_id, slot, address_id, account_id, role_id
 
     def __hash__(self):
         return hash(self.identity)

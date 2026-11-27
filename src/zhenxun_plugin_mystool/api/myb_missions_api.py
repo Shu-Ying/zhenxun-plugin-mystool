@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter, defaultdict
 from typing import List, Optional, Tuple, Type, Dict
 
 import httpx
@@ -178,7 +179,9 @@ class BaseMission:
                             f"米游币任务 - 讨论区签到: 用户 {self.account.display_name} 今日已经签到过了")
                         logger.debug(f"网络请求返回: {res.text}")
                         return MissionStatus(success=True, already_signed=True), 0
-                    return MissionStatus(success=True), api_result.data["points"]
+                    if res.status_code != 200 or api_result.retcode not in (0, 1):
+                        return MissionStatus(incorrect_return=True), None
+                    return MissionStatus(success=True), int(api_result.data["points"])
         except tenacity.RetryError as e:
             if is_incorrect_return(e):
                 logger.exception(f"米游币任务 - 讨论区签到: 服务器没有正确返回")
@@ -208,6 +211,8 @@ class BaseMission:
                             timeout=plugin_config.preference.timeout
                         )
                     api_result = ApiResultHandler(res.json())
+                    if res.status_code != 200 or api_result.retcode not in (0, 1):
+                        return BaseApiStatus(incorrect_return=True), None
                     for post in api_result.data["list"]:
                         if post["self_operation"]["attitude"] == 0:
                             post_id_list.append(post['post']['post_id'])
@@ -230,13 +235,18 @@ class BaseMission:
         :param retry: 是否允许重试
         """
         count = 0
-        get_post_status, posts = await self.get_posts(retry)
-        if not get_post_status:
-            return MissionStatus(failed_getting_post=True)
-        while count < read_times:
-            for post_id in posts:
-                if count == read_times:
-                    break
+        seen = set()
+        for _ in range(3):
+            if count >= read_times:
+                return MissionStatus(success=True)
+            get_post_status, posts = await self.get_posts(retry)
+            if not get_post_status or not posts:
+                return MissionStatus(login_expired=get_post_status.login_expired, failed_getting_post=True)
+            before = count
+            for post_id in list(dict.fromkeys(posts))[:30]:
+                if post_id in seen:
+                    continue
+                seen.add(post_id)
                 try:
                     async for attempt in get_async_retry(retry):
                         with attempt:
@@ -260,26 +270,26 @@ class BaseMission:
                                 logger.debug(f"网络请求返回: {res.text}")
                                 return MissionStatus(invalid_ds=True)
                             if api_result.message == "帖子不存在":
-                                continue
-                            temp = api_result.data.get("post")
-                            if temp is not None and "self_operation" not in temp:
+                                break
+                            temp = (api_result.data or {}).get("post")
+                            if (res.status_code != 200 or api_result.retcode not in (0, 1)
+                                    or not isinstance(temp, dict) or "self_operation" not in temp):
                                 raise ValueError
                             count += 1
                 except tenacity.RetryError as e:
                     if is_incorrect_return(e, ValueError):
                         logger.exception(f"米游币任务 - 阅读: 服务器没有正确返回")
-                        logger.debug(f"网络请求返回: {res.text}")
                         return MissionStatus(incorrect_return=True)
                     else:
                         logger.exception(f"米游币任务 - 阅读: 请求失败")
                         return MissionStatus(network_error=True)
-                if count != read_times:
-                    await asyncio.sleep(plugin_config.preference.sleep_time)
-            get_post_status, posts = await self.get_posts(retry)
-            if not get_post_status:
-                return MissionStatus(failed_getting_post=True)
+                if count >= read_times:
+                    return MissionStatus(success=True)
+                await asyncio.sleep(plugin_config.preference.sleep_time)
+            if count == before:
+                break
 
-        return MissionStatus(success=True)
+        return MissionStatus(failed_getting_post=True)
 
     async def like(self, like_times: int = 10, retry: bool = True) -> MissionStatus:
         """
@@ -289,13 +299,18 @@ class BaseMission:
         :param retry: 是否允许重试
         """
         count = 0
-        get_post_status, posts = await self.get_posts(retry)
-        if not get_post_status:
-            return MissionStatus(failed_getting_post=True)
-        while count < like_times:
-            for post_id in posts:
-                if count == like_times:
-                    break
+        seen = set()
+        for _ in range(3):
+            if count >= like_times:
+                return MissionStatus(success=True)
+            get_post_status, posts = await self.get_posts(retry)
+            if not get_post_status or not posts:
+                return MissionStatus(login_expired=get_post_status.login_expired, failed_getting_post=True)
+            before = count
+            for post_id in list(dict.fromkeys(posts))[:30]:
+                if post_id in seen:
+                    continue
+                seen.add(post_id)
                 try:
                     async for attempt in get_async_retry(retry):
                         with attempt:
@@ -321,25 +336,24 @@ class BaseMission:
                                 logger.debug(f"网络请求返回: {res.text}")
                                 return MissionStatus(invalid_ds=True)
                             if api_result.message == "帖子不存在":
-                                continue
-                            if api_result.message != "OK":
+                                break
+                            if res.status_code != 200 or api_result.retcode not in (0, 1) or api_result.message != "OK":
                                 raise ValueError
                             count += 1
                 except tenacity.RetryError as e:
                     if is_incorrect_return(e, ValueError):
                         logger.exception(f"米游币任务 - 点赞: 服务器没有正确返回")
-                        logger.debug(f"网络请求返回: {res.text}")
                         return MissionStatus(incorrect_return=True)
                     else:
                         logger.exception(f"米游币任务 - 点赞: 请求失败")
                         return MissionStatus(network_error=True)
-                if count != like_times:
-                    await asyncio.sleep(plugin_config.preference.sleep_time)
-            get_post_status, posts = await self.get_posts(retry)
-            if not get_post_status:
-                return MissionStatus(failed_getting_post=True)
+                if count >= like_times:
+                    return MissionStatus(success=True)
+                await asyncio.sleep(plugin_config.preference.sleep_time)
+            if count == before:
+                break
 
-        return MissionStatus(success=True)
+        return MissionStatus(failed_getting_post=True)
 
     async def share(self, retry: bool = True):
         """
@@ -349,7 +363,7 @@ class BaseMission:
         """
         get_post_status, posts = await self.get_posts(retry)
         if not get_post_status or not posts:
-            return MissionStatus(failed_getting_post=True)
+            return MissionStatus(login_expired=get_post_status.login_expired, failed_getting_post=True)
         try:
             async for attempt in get_async_retry(retry):
                 with attempt:
@@ -375,8 +389,8 @@ class BaseMission:
                         logger.debug(f"网络请求返回: {res.text}")
                         return MissionStatus(invalid_ds=True)
                     if api_result.message == "帖子不存在":
-                        continue
-                    if api_result.message != "OK":
+                        return MissionStatus(failed_getting_post=True)
+                    if res.status_code != 200 or api_result.retcode not in (0, 1) or api_result.message != "OK":
                         raise ValueError
         except tenacity.RetryError as e:
             if is_incorrect_return(e, ValueError):
@@ -484,9 +498,13 @@ async def get_missions(account: UserAccount, retry: bool = True) -> Tuple[BaseAp
                         f"获取米游币任务列表: 用户 {account.display_name} 登录失效")
                     logger.debug(f"网络请求返回: {res.text}")
                     return BaseApiStatus(login_expired=True), None
+                if res.status_code != 200 or api_result.retcode not in (0, 1):
+                    return BaseApiStatus(incorrect_return=True), None
                 mission_list: List[MissionData] = []
                 for mission in api_result.data["missions"]:
-                    mission_list.append(MissionData.parse_obj(mission))
+                    mission_list.append(MissionData.parse_obj({
+                        **mission, "board_scoped": any(mission.get(k) for k in ("gids", "game_id", "forum_id")),
+                    }))
                 return BaseApiStatus(success=True), mission_list
     except tenacity.RetryError as e:
         if is_incorrect_return(e):
@@ -505,9 +523,11 @@ async def get_missions_state(account: UserAccount, retry: bool = True) -> Tuple[
     :param account: 用户账号
     :param retry: 是否允许重试
     """
-    get_missions_status, missions = await get_missions(account)
+    get_missions_status, missions = await get_missions(account, retry=retry)
     if not get_missions_status:
         return get_missions_status, None
+    unverified = MissionState(current_myb=None, unconfirmed={mission.mission_key: mission for mission in missions},
+                              state_dict={})
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
@@ -521,21 +541,36 @@ async def get_missions_state(account: UserAccount, retry: bool = True) -> Tuple[
                         f"获取米游币任务完成情况: 用户 {account.display_name} 登录失效")
                     logger.debug(f"网络请求返回: {res.text}")
                     return BaseApiStatus(login_expired=True), None
-                state_dict = {}
+                if res.status_code != 200 or api_result.retcode not in (0, 1):
+                    return BaseApiStatus(incorrect_return=True), unverified
+                states = api_result.data["states"]
+                if not isinstance(states, list):
+                    return BaseApiStatus(incorrect_return=True), unverified
+                by_key = defaultdict(list)
+                for state in states:
+                    by_key[state["mission_key"]].append(state)
+                definitions = Counter(mission.mission_key for mission in missions)
+                state_dict, unconfirmed = {}, {}
                 for mission in missions:
-                    try:
-                        current = list(filter(lambda state: state["mission_key"] == mission.mission_key,
-                                              api_result.data["states"]))[0]["happened_times"]
-                        state_dict.setdefault(mission.mission_key, (mission, current))
-                    except IndexError:
-                        state_dict.setdefault(mission.mission_key, (mission, 0))
-                return BaseApiStatus(success=True), MissionState(state_dict=state_dict,
-                                                                 current_myb=api_result.data["total_points"])
+                    key = mission.mission_key
+                    entries = by_key[key]
+                    if (definitions[key] != 1 or mission.board_scoped or len(entries) != 1
+                            or any(entries[0].get(k) for k in ("gids", "game_id", "forum_id"))):
+                        unconfirmed.setdefault(key, mission)
+                        continue
+                    count = entries[0]["happened_times"]
+                    if type(count) is not int or count < 0:
+                        unconfirmed[key] = mission
+                        continue
+                    state_dict[key] = mission, count
+                return BaseApiStatus(success=True), MissionState(
+                    state_dict=state_dict, unconfirmed=unconfirmed, current_myb=api_result.data["total_points"],
+                )
     except tenacity.RetryError as e:
         if is_incorrect_return(e):
             logger.exception("获取米游币任务完成情况: 服务器没有正确返回")
             logger.debug(f"网络请求返回: {res.text}")
-            return BaseApiStatus(incorrect_return=True), None
+            return BaseApiStatus(incorrect_return=True), unverified
         else:
             logger.exception("获取米游币任务完成情况: 请求失败")
-            return BaseApiStatus(network_error=True), None
+            return BaseApiStatus(network_error=True), unverified

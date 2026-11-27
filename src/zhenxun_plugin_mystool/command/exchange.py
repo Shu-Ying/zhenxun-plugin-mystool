@@ -9,33 +9,34 @@ from datetime import datetime
 from multiprocessing import Manager
 from multiprocessing.pool import Pool
 from multiprocessing.synchronize import Lock
-from typing import List, Callable, Any, Tuple, Optional, Dict, Union
+from typing import List, Callable, Any, Tuple, Union
+from uuid import uuid4
 
-from apscheduler.events import JobExecutionEvent, EVENT_JOB_EXECUTED
 from nonebot import on_command, get_driver
-from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, MessageSegment as OneBotV11MessageSegment
+from nonebot.adapters.onebot.v11 import PrivateMessageEvent, MessageEvent as OneBotV11MessageEvent, MessageSegment as OneBotV11MessageSegment
 from nonebot.internal.params import ArgStr
 from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, T_State, CommandArg, Command
-from nonebot_plugin_apscheduler import scheduler
+from nonebot.rule import Rule
 
-from ..api.common import get_game_record, get_good_list, good_exchange_sync, \
-    get_device_fp, \
-    good_exchange
+from ..api.common import get_bound_game_roles, get_good_detail, get_good_list, get_device_fp, role_game_id
 from .account_selection import (
     AccountMenu, ask_for_account, require_selected_account, save_selected_account, select_account,
 )
 from .common import CommandRegistry
-from ..model import Good, GameRecord, ExchangeStatus, PluginDataManager, plugin_config, UserAccount, \
-    ExchangePlan, ExchangeResult, CommandUsage
+from ..model import Good, PluginDataManager, plugin_config, ExchangePlan, CommandUsage
 from ..model.common import format_exchange_time
+from ..services.credential_expiry import credential_fingerprint
+from ..services.game_roles import role_label
 from ..storage.codec import plan_key
+from ..storage.models import MystoolExchangeExecution
+from ..storage.repository import Repository
 from ..utils import COMMAND_BEGIN, logger, get_last_command_sep, GeneralMessageEvent, \
     send_private_msg, get_unique_users, \
     get_all_bind, game_list_to_image
 
 __all__ = [
-    "myb_exchange_plan", "get_good_image", "generate_image"
+    "myb_exchange_plan", "exchange_history", "get_good_image", "generate_image"
 ]
 
 _driver = get_driver()
@@ -62,11 +63,59 @@ CommandRegistry.set_usage(
         usage="具体用法：\n"
               "🛒 {HEAD}兑换{SEP}+ <商品ID> ➢ 新增兑换计划\n"
               "🗑️ {HEAD}兑换{SEP}- <商品ID> ➢ 删除兑换计划\n"
+              "📋 {HEAD}兑换结果 ➢ 私聊查看兑换结果\n"
               "🎁 {HEAD}商品 ➢ 查看米游社商品\n"
               "『{SEP}』为分隔符，使用NoneBot配置中的其他分隔符亦可"
     )
 )
 myb_exchange_plan_usage = CommandRegistry.get_usage(myb_exchange_plan)
+
+
+async def _private_exchange_history(event: OneBotV11MessageEvent) -> bool:
+    return isinstance(event, PrivateMessageEvent)
+
+
+exchange_history = on_command(
+    plugin_config.preference.command_start + "兑换结果",
+    rule=Rule(_private_exchange_history), priority=4, block=True,
+)
+CommandRegistry.set_usage(exchange_history, CommandUsage(
+    name="兑换结果", description="私聊查看最近兑换结果，核对后可以关闭待核实提示。",
+))
+
+
+@exchange_history.handle()
+async def _(event: PrivateMessageEvent, matcher: Matcher, command_arg=CommandArg()):
+    actor = event.get_user_id()
+    records = await Repository.load()
+    owner = records["bindings"].get(actor, actor)
+    owner_uuid = records["users"].get(owner, {}).get("uuid")
+    args = str(command_arg).split()
+    if args:
+        if len(args) != 2 or args[0] != "确认" or len(args[1]) != 10:
+            await matcher.finish(f"请发送「{COMMAND_BEGIN}兑换结果 确认 编号」。")
+        matches = await MystoolExchangeExecution.filter(
+            owner_id=owner, key__startswith=args[1], outcome="unknown", acknowledged=False,
+        ).limit(2)
+        if len(matches) != 1:
+            await matcher.finish("未找到这条待核实记录，请重新查看兑换结果。")
+    else:
+        history = await MystoolExchangeExecution.filter(owner_id=owner).order_by("-scheduled_at").limit(20)
+    current = await Repository.load()
+    if current["bindings"].get(actor, actor) != owner or current["users"].get(owner, {}).get("uuid") != owner_uuid:
+        await matcher.finish("绑定关系已变化，请重新查询。")
+    if args:
+        await MystoolExchangeExecution.filter(key=matches[0].key, outcome="unknown").update(acknowledged=True)
+        await matcher.finish("已关闭这条待核实提示。")
+    if not history:
+        await matcher.finish("暂无兑换结果。")
+    lines = []
+    for row in history:
+        text = "已关闭待核实提示" if row.acknowledged and row.outcome == "unknown" else OUTCOME_TEXT[row.outcome]
+        if row.outcome == "unknown" and not row.acknowledged:
+            text += f" 编号 {row.key[:10]}"
+        lines.append(f"{format_exchange_time(row.scheduled_at)} {row.account_label} · {row.goods_name}\n{text}")
+    await matcher.finish("\n\n".join(lines))
 
 
 @myb_exchange_plan.handle()
@@ -121,7 +170,11 @@ async def _(
                    f"\n- 📅兑换时间：{slot}" \
                    f"\n- 👤米游社账号：{menu.label_for(plan.account.bbs_uid)}"
             if reason := plan_pause_reason(plan):
-                explanation = "原兑换时间无法确认，计划已暂停" if reason == "schedule_unconfirmed" else "原兑换场次已过"
+                explanation = {
+                    "schedule_unconfirmed": "原兑换时间无法确认，计划已暂停",
+                    "target_unconfirmed": "原兑换角色无法确认，计划已暂停",
+                    "schedule_passed": "原兑换场次已过",
+                }[reason]
                 command_hint = f"{COMMAND_BEGIN}兑换{get_last_command_sep()}+ {good.goods_id}"
                 msg += f"\n- {explanation}。请使用『{command_hint}』确认新场次。"
             msg += "\n\n"
@@ -172,7 +225,7 @@ async def _(
         break_flag = False
         good = None
         for good_list in good_dict.values():
-            goods_on_sell = filter(lambda x: not x.time_end and x.time_limited, good_list)
+            goods_on_sell = filter(lambda x: not x.time_end and x.time_limited, good_list or [])
             for good in goods_on_sell:
                 if good.goods_id == good_id:
                     flag = False
@@ -188,23 +241,29 @@ async def _(
             state['scheduled_at'] = scheduled_at
             # 若为实物商品，也进入下一步骤，但是传入uid为None
             if good.is_virtual:
-                game_records_status, records = await get_game_record(account)
-                if game_records_status:
-                    if not records:
-                        await matcher.finish(
-                            "您的米游社账户下还没有绑定游戏账号，请先前往米游社绑定后重试")
-                    msg = '您米游社账户下的游戏账号：'
-                    for record in records:
-                        msg += f'\n🎮 {record.region_name} - {record.nickname} - UID {record.game_role_id}'
-                    state['records'] = records
-                    await matcher.send(
-                        "您兑换的是虚拟物品，请发送想要接收奖励的游戏账号UID：\n🚪发送“退出”即可退出")
-                    await asyncio.sleep(0.5)
-                    await matcher.send(msg)
-                elif getattr(game_records_status, "login_expired", False):
-                    await matcher.finish(f'⚠️米游社登录失效，请使用『{COMMAND_BEGIN}登录』重新登录后再添加计划')
-                else:
-                    await matcher.finish('⚠️获取游戏账号列表失败，无法继续')
+                game_records_status, records = await get_bound_game_roles(account)
+                if game_records_status.login_expired:
+                    await matcher.finish(f"网页凭据失效，请私聊发送「{COMMAND_BEGIN}登录 Web」后重试。")
+                if not game_records_status:
+                    await matcher.finish("暂无法验证游戏账号列表，无法继续。")
+                if not records:
+                    await matcher.finish("您的米游社账户下还没有绑定游戏账号，请先前往米游社绑定后重试。")
+                if not good.game_biz:
+                    detail_status, detail = await get_good_detail(good.goods_id)
+                    if detail_status and detail is not None:
+                        good.game_biz = detail.game_biz
+                game_id = role_game_id(good.game_biz)
+                if not game_id:
+                    await matcher.finish("暂无法确认商品对应的游戏，请稍后重试。")
+                choices = [record for record in records if record.game_id == game_id]
+                if not choices:
+                    await matcher.finish("此账号未绑定该商品适用的游戏角色。")
+                options = {str(index): record for index, record in enumerate(choices, start=1)}
+                state["exchange_roles"] = options
+                state["exchange_role_version"] = credential_fingerprint(account, "web")
+                await matcher.send("请选择接收虚拟商品的角色序号，或回复「退出」。\n" + "\n".join(
+                    f"{number}. {role_label(record)}" for number, record in options.items()
+                ))
             else:
                 if not account.address:
                     await matcher.finish('⚠️您还没有配置地址哦，请先配置地址')
@@ -225,11 +284,11 @@ async def _(
         options = {}
         lines = []
         for index, plan in enumerate(sorted(plans, key=lambda item: (item.scheduled_at or 0, plan_key(item))), 1):
-            options[str(index)] = plan_key(plan)
+            options[str(index)] = (plan_key(plan), plan.generation)
             slot = format_exchange_time(plan.scheduled_at) if plan.scheduled_at is not None else "待确认"
             target = "实物"
             if plan.game_record:
-                target = f"游戏 UID {plan.game_record.game_role_id}"
+                target = role_label(plan.game_record)
             elif plan.address:
                 target = f"收货地址 {plan.address.id}"
             lines.append(f"{index}. {slot} · {target}")
@@ -270,7 +329,7 @@ async def _(
         identity = state['delete_plan_options'].get(game_uid)
         if identity is None:
             await matcher.reject('⚠️请选择要删除的计划序号')
-        plan = next((item for item in user.exchange_plans if plan_key(item) == identity), None)
+        plan = next((item for item in user.exchange_plans if (plan_key(item), item.generation) == identity), None)
         if plan is None:
             await matcher.finish('该计划已不存在，请重新查看兑换计划')
         await remove_exchange_plan(matcher, state, event, user, plan)
@@ -278,19 +337,22 @@ async def _(
     good: Good = state['good']
     record = None
     if good.is_virtual:
-        records: List[GameRecord] = state['records']
-        record_filter = filter(lambda x: x.game_role_id == game_uid, records)
-        record = next(record_filter, None)
-        if not record:
-            await matcher.reject('⚠️您输入的UID不在上述账号内，请重新输入')
+        record = state["exchange_roles"].get(game_uid.strip())
+        if record is None:
+            await matcher.reject("请回复有效的角色序号，或回复「退出」。")
+        if credential_fingerprint(account, "web") != state["exchange_role_version"]:
+            await matcher.finish("网页凭据已变化，请重新选择兑换角色。")
     plan = ExchangePlan(
-        good=good, address=account.address, game_record=record, account=account,
-        scheduled_at=state['scheduled_at'],
+        good=good, address=None if good.is_virtual else account.address, game_record=record, account=account,
+        scheduled_at=state['scheduled_at'], generation=uuid4().hex,
     )
     plan.account = account
     if plan_pause_reason(plan):
         await matcher.finish('⚠️所选兑换场次已过，请重新选择场次')
-    if plan in user.exchange_plans:
+    if await MystoolExchangeExecution.filter(key=redemption_key(plan)).exists():
+        await matcher.finish("这场兑换已有执行记录，请私聊查看兑换结果。")
+    if any(not item.paused_reason and redemption_key(item) == redemption_key(plan)
+           and (good.is_virtual or item.address == plan.address) for item in user.exchange_plans):
         await matcher.finish('⚠️您已经配置过该商品的兑换哦！')
     await hydrate_game_biz(plan)
     if not plan.account.device_fp:
@@ -303,11 +365,14 @@ async def _(
         await matcher.finish('⚠️所选兑换场次已过，请重新选择场次')
     replaced = {
         item for item in user.exchange_plans
-        if item.paused_reason and item.redemption_target == plan.redemption_target
+        if (item.paused_reason and redemption_destination(item) == redemption_destination(plan))
+        or redemption_key(item) == redemption_key(plan)
     }
     user.exchange_plans.difference_update(replaced)
     user.exchange_plans.add(plan)
     await save_selected_account(matcher, state, event)
+    for item in replaced:
+        cancel_plan(event.get_user_id(), item)
 
     if not schedule_plan(event.get_user_id(), plan):
         await save_selected_account(matcher, state, event)
@@ -386,7 +451,9 @@ async def _(event: Union[GeneralMessageEvent], arg=ArgPlainText("content")):
             f'{arg[1]} 分区暂时没有可兑换的限时商品。如果这与实际不符，你可以尝试用『{COMMAND_BEGIN}商品 更新』进行更新。')
 
 
-from ..services.exchange_jobs import cancel_plan, hydrate_game_biz, plan_pause_reason, schedule_plan
+from ..services.exchange_jobs import (
+    OUTCOME_TEXT, cancel_plan, hydrate_game_biz, plan_pause_reason, redemption_destination, redemption_key, schedule_plan,
+)
 
 
 def image_process(game: str, _lock: Lock = None):

@@ -34,8 +34,6 @@ def exchange(mystool, monkeypatch):
     monkeypatch.setattr(jobs.time, "time", lambda: NOW)
     monkeypatch.setattr(jobs, "scheduler", AsyncIOScheduler())
     monkeypatch.setattr(jobs, "_jobs", {})
-    monkeypatch.setattr(jobs, "_results", {})
-    monkeypatch.setattr(jobs, "_locks", {})
     monkeypatch.setattr(jobs, "send_private_msg", AsyncMock())
     monkeypatch.setattr(jobs, "good_exchange_sync", _reject_redemption)
     monkeypatch.setattr(jobs, "get_good_detail", AsyncMock(side_effect=AssertionError("Unexpected goods query")))
@@ -49,9 +47,9 @@ def _reject_redemption(*args):
     pytest.fail("A scheduling test attempted to redeem goods")
 
 
-async def _dispatch_result(exchange, job, code, retval=None):
+async def _dispatch_result(exchange, job, code):
     event = JobExecutionEvent(
-        code, job.id, "default", datetime.fromtimestamp(FUTURE, timezone.utc), retval=retval,
+        code, job.id, "default", datetime.fromtimestamp(FUTURE, timezone.utc),
     )
     exchange.registered_scheduler._dispatch_event(event)
     handler = exchange.jobs.scheduler.get_job(f"mystool-result-{job.id}")
@@ -133,9 +131,8 @@ def test_exchange_request_does_not_modify_shared_device_headers(exchange, monkey
         seen.append(request.headers)
         return httpx.Response(200, json={"retcode": -100, "message": "登录失效，请重新登录"})
 
-    client_type = httpx.AsyncClient if async_call else httpx.Client
-    name = "AsyncClient" if async_call else "Client"
-    monkeypatch.setattr(httpx, name, lambda: client_type(transport=httpx.MockTransport(receive)))
+    client_type = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda: client_type(transport=httpx.MockTransport(receive)))
     if async_call:
         status, _ = asyncio.run(api.good_exchange(plan))
     else:
@@ -201,7 +198,7 @@ def test_startup_preserves_legacy_identity_and_only_schedules_original_future_sl
     assert plans[(OWNER, row_id)]["good"]["game_biz"] == ("hk4e_cn" if expected_reason is None else None)
     assert exchange.codec.encode(exchange.codec.decode(stored)) == stored
     scheduled = [job.trigger.run_date.timestamp() for job in exchange.jobs.scheduler.get_jobs()]
-    assert scheduled == ([expected_slot] * exchange.jobs.plugin_config.preference.exchange_thread_count
+    assert scheduled == ([expected_slot]
                          if expected_reason is None else [])
     if expected_reason is not None:
         exchange.jobs.get_good_detail.assert_not_awaited()
@@ -216,7 +213,6 @@ def test_scheduled_exchange_login_expiry_honors_notice_setting(exchange, monkeyp
     expiry = import_module(f"{exchange.package}.services.credential_expiry")
     expiry_notice = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(expiry, "send_private_msg", expiry_notice)
-    monkeypatch.setattr(exchange.jobs.plugin_config.preference, "exchange_thread_count", 2)
 
     def expired_exchange(scheduled_plan):
         assert scheduled_plan.scheduled_at == FUTURE
@@ -227,8 +223,9 @@ def test_scheduled_exchange_login_expiry_honors_notice_setting(exchange, monkeyp
 
     async def run():
         await exchange.jobs.restore_exchange_jobs()
-        for job in exchange.jobs.scheduler.get_jobs():
-            await _dispatch_result(exchange, job, EVENT_JOB_EXECUTED, await job.func(*job.args))
+        job, = exchange.jobs.scheduler.get_jobs()
+        monkeypatch.setattr(exchange.jobs.time, "time", lambda: FUTURE)
+        await job.func(*job.args)
 
     asyncio.run(_with_database(exchange, records, run))
 
@@ -244,48 +241,78 @@ def test_scheduled_exchange_login_expiry_honors_notice_setting(exchange, monkeyp
 
 
 @pytest.mark.parametrize("completed", [None, True, False])
-@pytest.mark.parametrize("missed_first", [True, False])
-def test_missed_exchange_workers_only_pause_the_plan_if_no_worker_ran(
-    exchange, monkeypatch, completed, missed_first
-):
+def test_single_exchange_records_completed_or_missed_original_slot(exchange, monkeypatch, completed):
     plan = _plan(exchange, FUTURE)
-    records = _records(exchange, plan)
-    monkeypatch.setattr(exchange.jobs.plugin_config.preference, "exchange_thread_count", 2)
     common = import_module(f"{exchange.package}.model.common")
+    models = import_module(f"{exchange.package}.storage.models")
 
     async def run():
         await exchange.jobs.restore_exchange_jobs()
-        first, second = exchange.jobs.scheduler.get_jobs()
-        missed, other = (first, second) if missed_first else (second, first)
-        events = [(missed, EVENT_JOB_MISSED, None)]
+        job, = exchange.jobs.scheduler.get_jobs()
+        monkeypatch.setattr(exchange.jobs.time, "time", lambda: FUTURE)
         if completed is None:
-            events.append((other, EVENT_JOB_MISSED, None))
+            await _dispatch_result(exchange, job, EVENT_JOB_MISSED)
+            assert not await models.MystoolExchangeExecution.exists()
         else:
             result = exchange.model.ExchangeResult(result=completed, return_data={}, plan=plan)
-            events.append((other, EVENT_JOB_EXECUTED, (common.ExchangeStatus(success=True), result)))
-        for job, code, result in events if missed_first else reversed(events):
-            await _dispatch_result(exchange, job, code, result)
+            monkeypatch.setattr(exchange.jobs, "good_exchange_sync", lambda _: (common.ExchangeStatus(success=True), result))
+            await job.func(*job.args)
+            row = await models.MystoolExchangeExecution.get()
+            assert row.outcome == ("success" if completed else "rejected")
         return await exchange.storage.Repository.load()
 
-    stored = asyncio.run(_with_database(exchange, records, run))
-
+    stored = asyncio.run(_with_database(exchange, _records(exchange, plan), run))
     exchange.jobs.send_private_msg.assert_awaited_once()
     if completed is None:
-        row = stored["plans"][(OWNER, _old_id(FUTURE))]
-        assert row["scheduled_at"] == FUTURE
-        assert row["paused_reason"] == "schedule_passed"
+        assert stored["plans"][(OWNER, _old_id(FUTURE))]["paused_reason"] == "schedule_passed"
         assert "错过" in exchange.jobs.send_private_msg.await_args.args[1]
     else:
         assert not stored["plans"]
-        message = "兑换成功" if completed else "兑换失败"
-        assert message in exchange.jobs.send_private_msg.await_args.args[1]
-    assert not exchange.jobs._jobs
-    assert not exchange.jobs._results
+        assert ("兑换成功" if completed else "已明确拒绝") in exchange.jobs.send_private_msg.await_args.args[1]
+
+
+def test_exchange_cannot_resubmit_after_claim_crash_and_recreated_plan(exchange, monkeypatch):
+    plan = _plan(exchange, FUTURE)
+    models = import_module(f"{exchange.package}.storage.models")
+    sends = []
+
+    async def run():
+        repository = exchange.storage.Repository
+        await exchange.jobs.restore_exchange_jobs()
+        job, = exchange.jobs.scheduler.get_jobs()
+        monkeypatch.setattr(exchange.jobs.time, "time", lambda: FUTURE)
+        # Simulate the process exiting after the durable claim and before a response.
+        claims = await asyncio.gather(exchange.jobs._claim(*job.args), exchange.jobs._claim(*job.args))
+        assert [state for _, state in claims].count("claimed") == 1
+        await repository.update(lambda records: records["plans"].clear())
+        replacement = _plan(exchange, FUTURE)
+        replacement.scheduled_at = FUTURE
+        replacement.generation = "replacement"
+        payload = next(iter(_records(exchange, replacement)["plans"].values()))
+        await repository.update(lambda records: records["plans"].update({(OWNER, _old_id(FUTURE)): payload}))
+        monkeypatch.setattr(exchange.jobs, "good_exchange_sync", lambda value: sends.append(value))
+        await job.func(*job.args)
+        await exchange.jobs.execute_exchange_job(OWNER, _old_id(FUTURE), replacement.generation)
+        await exchange.jobs.restore_exchange_jobs()
+        row = await models.MystoolExchangeExecution.get()
+        assert row.outcome == "unknown"
+        assert not (await repository.load())["plans"]
+
+    asyncio.run(_with_database(exchange, _records(exchange, plan), run))
+    assert not sends
+
+
+def test_redemption_keys_capture_virtual_region_but_ignore_physical_address(exchange):
+    physical = _plan(exchange, FUTURE)
+    other = physical.copy(update={"address": SimpleNamespace(id=12)})
+    assert exchange.jobs.redemption_key(physical) == exchange.jobs.redemption_key(other)
+    virtual = _plan(exchange, FUTURE, virtual=True)
+    other = virtual.copy(update={"game_record": virtual.game_record.copy(update={"region": "cn_qd01"})})
+    assert exchange.jobs.redemption_key(virtual) != exchange.jobs.redemption_key(other)
 
 
 def test_delayed_exchange_result_callback_still_records_the_captured_outcome(exchange, monkeypatch):
     records = _records(exchange, _plan(exchange, FUTURE))
-    monkeypatch.setattr(exchange.jobs.plugin_config.preference, "exchange_thread_count", 1)
 
     async def run():
         scheduler = exchange.jobs.scheduler
@@ -380,7 +407,7 @@ def test_exchange_confirmation_replaces_only_paused_plans_for_the_same_destinati
     assert set(stored["plans"]) == {(OWNER, row_id), (OWNER, unrelated_id)}
     assert stored["plans"][(OWNER, row_id)]["scheduled_at"] == original_slot
     assert stored["plans"][(OWNER, row_id)]["paused_reason"] is None
-    assert len(exchange.jobs.scheduler.get_jobs()) == exchange.jobs.plugin_config.preference.exchange_thread_count
+    assert len(exchange.jobs.scheduler.get_jobs()) == 1
 
 
 def test_exchange_deletion_requests_selection_when_goods_id_matches_multiple_plans(exchange):
@@ -412,7 +439,7 @@ def test_exchange_deletion_requests_selection_when_goods_id_matches_multiple_pla
 
     assert (OWNER, row_id) not in stored["plans"]
     assert list(stored["plans"]) == [(OWNER, _old_id(FUTURE))]
-    assert len(exchange.jobs.scheduler.get_jobs()) == exchange.jobs.plugin_config.preference.exchange_thread_count
+    assert len(exchange.jobs.scheduler.get_jobs()) == 1
 
 
 def test_exchange_deletion_rejects_a_choice_after_the_user_is_unbound(exchange):
@@ -447,7 +474,7 @@ def test_virtual_exchange_without_game_records_prompts_player_to_bind_game(excha
     records = _records(exchange, plan)
     command = import_module(f"{exchange.package}.command.exchange")
     monkeypatch.setattr(command, "get_good_list", AsyncMock(return_value=(True, [plan.good])))
-    monkeypatch.setattr(command, "get_game_record", AsyncMock(return_value=(True, [])))
+    monkeypatch.setattr(command, "get_bound_game_roles", AsyncMock(return_value=(import_module(f"{exchange.package}.model.common").BaseApiStatus(success=True), [])))
     matcher = SimpleNamespace(finish=AsyncMock(side_effect=FinishedException))
     event = SimpleNamespace(get_user_id=lambda: OWNER)
 
@@ -477,7 +504,10 @@ def test_exchange_uses_game_role_uid_or_shipping_address_after_account_selection
     records["plans"].clear()
     command = import_module(f"{exchange.package}.command.exchange")
     monkeypatch.setattr(command, "get_good_list", AsyncMock(return_value=(True, [plan.good])))
-    monkeypatch.setattr(command, "get_game_record", AsyncMock(return_value=(True, [plan.game_record])))
+    common = import_module(f"{exchange.package}.model.common")
+    monkeypatch.setattr(command, "get_bound_game_roles", AsyncMock(
+        return_value=(common.BaseApiStatus(success=True), [plan.game_record]),
+    ))
     matcher = command.myb_exchange_plan()
     matcher.send = AsyncMock()
     matcher.finish = AsyncMock(side_effect=FinishedException)
@@ -489,8 +519,9 @@ def test_exchange_uses_game_role_uid_or_shipping_address_after_account_selection
             event=event, matcher=matcher, state=matcher.state, good_id=GOODS_ID,
         )
         if virtual:
-            assert "UID 1001" in matcher.send.await_args.args[0]
-            game_uid = "1001"
+            menu = matcher.send.await_args.args[0]
+            assert "1. 测试玩家" in menu and "1001" not in menu
+            game_uid = "1"
         else:
             prefilled = matcher.get_arg("game_uid")
             assert prefilled is not None
@@ -509,3 +540,94 @@ def test_exchange_uses_game_role_uid_or_shipping_address_after_account_selection
         assert saved["game_record"]["game_role_id"] == "1001"
     else:
         assert saved["address"]["id"] == "678"
+
+
+
+def test_parallel_owners_with_same_mihoyo_account_submit_only_once(exchange, monkeypatch):
+    plan = _plan(exchange, FUTURE)
+    records = _records(exchange, plan)
+    records["users"]["other"] = json.loads(exchange.model.UserData().json(exclude={"accounts", "exchange_plans"}))
+    records["accounts"][("other", UID)] = records["accounts"][(OWNER, UID)]
+    plan_id = _old_id(FUTURE)
+    records["plans"][("other", plan_id)] = records["plans"][(OWNER, plan_id)]
+    common = import_module(f"{exchange.package}.model.common")
+    models = import_module(f"{exchange.package}.storage.models")
+    calls = []
+
+    def unknown_receipt(scheduled):
+        calls.append(scheduled.scheduled_at)
+        return common.ExchangeStatus(network_error=True), None
+
+    async def run():
+        monkeypatch.setattr(exchange.jobs, "good_exchange_sync", unknown_receipt)
+        monkeypatch.setattr(exchange.jobs.time, "time", lambda: FUTURE)
+        await asyncio.gather(
+            exchange.jobs.execute_exchange_job(OWNER, plan_id),
+            exchange.jobs.execute_exchange_job("other", plan_id),
+        )
+        row = await models.MystoolExchangeExecution.get()
+        assert row.outcome == "unknown"
+        assert not (await exchange.storage.Repository.load())["plans"]
+
+    asyncio.run(_with_database(exchange, records, run))
+    assert calls == [FUTURE]
+
+
+@pytest.mark.parametrize("http_status,payload,expected", [
+    (200, {"retcode": 0, "message": "OK", "data": {"order_id": "fixture"}}, True),
+    (502, {"retcode": 0, "message": "OK", "data": {"order_id": "fixture"}}, None),
+    (200, {"retcode": -1, "message": "OK", "data": {}}, None),
+    (200, {"retcode": -464, "message": "未知错误", "data": None}, None),
+])
+def test_exchange_receipt_requires_confirmed_business_result(exchange, monkeypatch, http_status, payload, expected):
+    import httpx
+
+    api = import_module(f"{exchange.package}.api.common")
+    client = httpx.Client
+    attempts = []
+
+    def respond(request):
+        attempts.append(request.method)
+        return httpx.Response(http_status, json=payload)
+
+    monkeypatch.setattr(httpx, "Client", lambda: client(transport=httpx.MockTransport(respond)))
+    status, outcome = api.good_exchange_sync(_plan(exchange, FUTURE))
+    assert attempts == ["POST"]
+    assert (outcome.result if outcome is not None else None) is expected
+    assert bool(status) == bool(expected)
+
+
+
+def test_pending_exchange_survives_reopening_database(exchange, monkeypatch, tmp_path):
+    plan = _plan(exchange, FUTURE)
+    models = import_module(f"{exchange.package}.storage.models")
+    db_url = f"sqlite://{(tmp_path / 'mystool.sqlite3').as_posix()}"
+    modules = {"models": [f"{exchange.package}.storage.models"]}
+    plan_id = _old_id(FUTURE)
+
+    async def run():
+        await Tortoise.init(db_url=db_url, modules=modules)
+        try:
+            await Tortoise.generate_schemas()
+            await exchange.storage.initialize_storage()
+            repository = exchange.storage.Repository
+            await repository.commit(await repository.load(), _records(exchange, plan))
+            monkeypatch.setattr(exchange.jobs.time, "time", lambda: FUTURE)
+            _, state = await exchange.jobs._claim(OWNER, plan_id, None)
+            assert state == "claimed"
+        finally:
+            await Tortoise.close_connections()
+
+        await Tortoise.init(db_url=db_url, modules=modules)
+        try:
+            await exchange.storage.initialize_storage()
+            await exchange.jobs.execute_exchange_job(OWNER, plan_id)
+            await exchange.jobs.restore_exchange_jobs()
+            assert not exchange.jobs.scheduler.get_jobs()
+            pending = await models.MystoolExchangeExecution.get()
+            assert pending.outcome == "unknown"
+            assert not (await repository.load())["plans"]
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())

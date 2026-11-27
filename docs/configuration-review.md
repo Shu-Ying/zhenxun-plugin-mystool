@@ -35,7 +35,6 @@
 | 请求重试次数 | max_retry_times | 3 | 启用重试时最多重试 3 次，共 4 次尝试。 |
 | 请求重试间隔秒 | retry_interval | 2 秒 | 请求重试等待间隔。 |
 | 兑换时区 | timezone | Asia/Shanghai | 兑换时间转换及展示。 |
-| 兑换线程数 | exchange_thread_count | 2 | 每个兑换计划的任务数量和结果汇总。 |
 | 日志前缀 | log_head | 空字符串 | 部分日志正文前缀，日志仍由宿主管理。 |
 | 文件编码 | encoding | utf-8 | 当前实际传给 ImageFont.truetype 的字体编码参数。 |
 | 最大用户数 | max_user | 0 | 登录用户数量限制；0 和 -1 表示不限制。 |

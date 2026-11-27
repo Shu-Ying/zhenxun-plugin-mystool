@@ -77,8 +77,11 @@ class BaseGameSign:
                     async with httpx.AsyncClient() as client:
                         res = await client.get(self.url_reward, headers=self.headers_reward,
                                                timeout=plugin_config.preference.timeout)
+                    result = ApiResultHandler(res.json())
+                    if res.status_code != 200 or result.retcode not in (0, 1):
+                        return BaseApiStatus(incorrect_return=True), None
                     award_list = []
-                    for award in res.json()["data"]["awards"]:
+                    for award in result.data["awards"]:
                         award_list.append(Award.parse_obj(award))
                     return BaseApiStatus(success=True), award_list
         except tenacity.RetryError as e:
@@ -123,6 +126,8 @@ class BaseGameSign:
                             f"获取签到数据 - 用户 {self.account.display_name} DS 校验失败")
                         logger.debug(f"网络请求返回: {res.text}")
                         return BaseApiStatus(invalid_ds=True), None
+                    if res.status_code != 200 or api_result.retcode not in (0, 1):
+                        return BaseApiStatus(incorrect_return=True), None
                     return BaseApiStatus(success=True), GameSignInfo.parse_obj(api_result.data)
         except tenacity.RetryError as e:
             if is_incorrect_return(e):
@@ -204,7 +209,9 @@ class BaseGameSign:
                             f"游戏签到 - 用户 {self.account.display_name} DS 校验失败")
                         logger.debug(f"网络请求返回: {res.text}")
                         return BaseApiStatus(invalid_ds=True), None
-                    elif api_result.data.get("risk_code") != 0:
+                    if res.status_code != 200 or api_result.retcode not in (0, 1):
+                        return BaseApiStatus(incorrect_return=True), None
+                    if api_result.data.get("risk_code") != 0:
                         logger.warning(
                             f"{plugin_config.preference.log_head}游戏签到 - 用户 {self.account.display_name} 可能被人机验证阻拦")
                         logger.debug(f"{plugin_config.preference.log_head}网络请求返回: {res.text}")

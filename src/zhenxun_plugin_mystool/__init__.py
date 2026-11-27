@@ -22,6 +22,9 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     usage=
     f"\n🔐 {_command_begin}登录 ➢ 登录绑定米游社账户"
+    f"\n🔎 {_command_begin}账号状态 ➢ 私聊检查 App 和网页凭据"
+    f"\n🎮 {_command_begin}签到角色 ➢ 私聊选择各游戏的签到角色"
+    f"\n📋 {_command_begin}兑换结果 ➢ 私聊查看兑换结果"
     f"\n📦 {_command_begin}地址 ➢ 设置收货地址ID"
     f"\n🗓️ {_command_begin}签到 ➢ 手动进行游戏签到"
     f"\n📅 {_command_begin}任务 ➢ 手动执行米游币任务"
@@ -42,7 +45,7 @@ __plugin_meta__ = PluginMetadata(
         version=_version.__version__,
         menu_type="米游社",
         commands=[Command(command=plugin_config.preference.command_start + name)
-                  for name in ("登录", "地址", "签到", "任务", "兑换", "商品",
+                  for name in ("登录", "账号状态", "签到角色", "兑换结果", "地址", "签到", "任务", "兑换", "商品",
                                "原神便笺", "铁道便笺", "设置", "账号设置",
                                "通知设置", "导出Cookies", "用户绑定",
                                "帮助")],

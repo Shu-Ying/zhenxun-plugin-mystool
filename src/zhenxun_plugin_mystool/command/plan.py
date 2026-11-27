@@ -3,28 +3,26 @@ from ..storage import data_session
 import threading
 from typing import Union, Optional, Iterable, Dict
 
-from nonebot import on_command, get_adapters
-from nonebot.adapters.onebot.v11 import MessageSegment as OneBotV11MessageSegment, Adapter as OneBotV11Adapter, \
-    MessageEvent as OneBotV11MessageEvent, GroupMessageEvent as OneBotV11GroupMessageEvent, \
-    Bot
-from nonebot.exception import ActionFailed
+from nonebot import on_command
+from nonebot.adapters.onebot.v11 import MessageSegment as OneBotV11MessageSegment, GroupMessageEvent as OneBotV11GroupMessageEvent, Bot
 from nonebot.internal.matcher import Matcher
 from nonebot.params import CommandArg
 from nonebot_plugin_apscheduler import scheduler
 from zhenxun.utils.message import MessageUtils
 from pydantic.v1 import BaseModel
 
-from ..api import BaseGameSign
+from ..api import BaseGameSign, GenshinImpactSign, StarRailSign
 from ..api import BaseMission, get_missions_state
-from ..api.common import device_login, device_save, genshin_note, get_game_record, starrail_note
+from ..api.common import device_login, device_save, get_bound_game_roles, get_role_notes
 from ..command.common import CommandRegistry
 from ..command.exchange import generate_image
 from ..model import (MissionStatus, PluginDataManager, plugin_config, UserData, CommandUsage, GenshinNoteNotice,
                      StarRailNoteNotice)
 from ..utils import get_file, logger, COMMAND_BEGIN, GeneralMessageEvent, send_private_msg, get_all_bind, \
     get_unique_users, get_validate
-from ..services.credential_expiry import CredentialExpiry, web_token_expiry_notice
+from ..services.credential_expiry import CredentialExpiry, credential_fingerprint, web_token_expiry_notice
 from ..services.permissions import can_manage_accounts
+from ..services.game_roles import role_key, role_label, select_game_roles
 
 __all__ = [
     "manually_game_sign", "manually_bbs_sign", "manually_genshin_note_check",
@@ -157,7 +155,7 @@ class NoteNoticeStatus(BaseModel):
     starrail = StarRailNoteNotice()
 
 
-note_notice_status: Dict[tuple[str, str], NoteNoticeStatus] = {}
+note_notice_status: Dict[tuple[str, str, int, str, str], NoteNoticeStatus] = {}
 """记录账号对应的便笺通知状态"""
 
 manually_genshin_note_check = on_command(
@@ -234,171 +232,150 @@ async def perform_game_sign(
         *,
         owner_id: str,
 ):
-    """
-    执行游戏签到函数，并发送给用户签到消息。
-
-    :param user: 用户数据
-    :param user_ids: 发送通知的所有用户ID
-    :param matcher: 事件响应器
-    :param event: 事件
-    """
+    rewards = {}
     for account in user.accounts.values():
-        # 自动签到时，要求用户打开了签到功能；手动签到时都可以调用执行。
         if not matcher and not account.enable_game_sign:
             continue
         expiry = CredentialExpiry(owner_id, account, reply=matcher.send if matcher else None)
         if await expiry.skip("web", "游戏签到"):
             continue
-        msgs_list = []
-        game_record_status, records = await get_game_record(account)
-        if not game_record_status:
-            if await expiry.handle(game_record_status, "combined", "查询签到游戏账号"):
-                continue
-            message = f"⚠️账户 {account.display_name} 获取游戏账号信息失败，请重新尝试"
-            if matcher:
-                await matcher.send(message)
-            elif user.enable_notice:
-                for user_id in user_ids:
-                    await send_private_msg(user_id=user_id, message=message)
+        records_status, records = await get_bound_game_roles(account)
+        if await expiry.handle(records_status, "web", "查询签到游戏账号"):
             continue
-        games_has_record = []
-        device_auth_blocked = False
+        messages = []
 
-        async def prepare_device():
-            nonlocal device_auth_blocked
-            operation = "安卓签到设备准备"
-            if device_auth_blocked or await expiry.skip("app", operation):
-                device_auth_blocked = True
-                return False
-            if await expiry.handle(await device_login(account), "app", operation):
-                device_auth_blocked = True
-                return False
-            device_auth_blocked = await expiry.handle(await device_save(account), "app", operation)
-            return not device_auth_blocked
-
-        for class_type in BaseGameSign.available_game_signs:
-            signer = class_type(account, records)
-            if not signer.has_record:
-                continue
-            else:
-                games_has_record.append(signer)
-                if class_type.en_name not in account.game_sign_games:
-                    continue
-            signed = False
-            get_info_status, info = await signer.get_info(account.platform)
-            if not get_info_status:
-                if await expiry.handle(get_info_status, "web", f"{signer.name}签到查询"):
-                    break
-                if matcher:
-                    msgs_list.append(f"⚠️账户 {account.display_name} 获取签到记录失败")
-                elif user.enable_notice:
-                    for user_id in user_ids:
-                        await send_private_msg(
-                            user_id=user_id,
-                            message=f"⚠️账户 {account.display_name} 获取签到记录失败"
-                        )
-            else:
-                signed = info.is_sign
-
-            # 若没签到，则进行签到功能；若获取今日签到情况失败，仍可继续
-            if (get_info_status and not info.is_sign) or not get_info_status:
-                sign_status, mmt_data = await signer.sign(account.platform, prepare_device=prepare_device)
-                if device_auth_blocked:
-                    break
-                if sign_status.need_verify:
-                    if plugin_config.preference.geetest_url or user.geetest_url:
-                        for i in range(3):
-                            if matcher:
-                                msgs_list.append(f"⏳[验证码{i}] 正在尝试完成人机验证，请稍后...")
-                            if not (geetest_result := await get_validate(user, mmt_data.gt, mmt_data.challenge)):
-                                continue  # 如果没有获取到validate不进行签到，直接重试
-                            sign_status, mmt_data = await signer.sign(
-                                account.platform, mmt_data, geetest_result, prepare_device=prepare_device
-                            )
-                            if sign_status or sign_status.login_expired or device_auth_blocked:
-                                break
-                if device_auth_blocked:
-                    break
-
-                if await expiry.handle(sign_status, "web", f"{signer.name}签到"):
-                    break
-                if not sign_status:
-                    if sign_status.need_verify:
-                        message = (f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到时可能遇到验证码拦截，"
-                                   f"请尝试使用命令『{COMMAND_BEGIN}账号设置』更改设备平台，若仍失败请手动前往米游社签到")
-                    else:
-                        message = f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到失败，请稍后再试"
-                    if matcher:
-                        msgs_list.append(message)
-                    elif user.enable_notice:
-                        for user_id in user_ids:
-                            await send_private_msg(user_id=user_id, message=message)
-                    await asyncio.sleep(plugin_config.preference.sleep_time)
-                    continue
-
-                await asyncio.sleep(plugin_config.preference.sleep_time)
-
-            # 用户打开通知或手动签到时，进行通知
-            if user.enable_notice or matcher:
-                onebot_img_msg, notice_image = "", None
-                get_info_status, info = await signer.get_info(account.platform)
-                if await expiry.handle(get_info_status, "web", f"{signer.name}签到结果查询"):
-                    break
-                get_award_status, awards = await signer.get_rewards()
-                if not get_info_status or not get_award_status:
-                    msg = f"⚠️账户 {account.display_name} 🎮『{signer.name}』获取签到结果失败！请手动前往米游社查看"
-                else:
-                    award = awards[info.total_sign_day - 1]
-                    if info.is_sign:
-                        status = "签到成功！" if not signed else "已经签到过了"
-                        msg = f"🪪账户 {account.display_name}" \
-                              f"\n🎮『{signer.name}』" \
-                              f"\n🎮状态: {status}" \
-                              f"\n{signer.record.nickname}·{signer.record.level}" \
-                              "\n\n🎁今日签到奖励：" \
-                              f"\n{award.name} * {award.cnt}" \
-                              f"\n\n📅本月签到次数：{info.total_sign_day}"
-                        img_file = await get_file(award.icon)
-                        if img_file:
-                            onebot_img_msg = OneBotV11MessageSegment.image(img_file)
-                            notice_image = img_file
-                        else:
-                            logger.warning(f"{plugin_config.preference.log_head}签到奖励图片下载失败，仅发送文字结果")
-                    else:
-                        msg = f"⚠️账户 {account.display_name} 🎮『{signer.name}』签到失败，请稍后重试或前往米游社签到"
-                if matcher:
-                    try:
-                        if isinstance(event, OneBotV11MessageEvent):
-                            msgs_list.append(msg + onebot_img_msg)
-                    except ActionFailed:
-                        pass
-                else:
-                    notification = MessageUtils.build_message(
-                        [msg, notice_image] if notice_image else msg
-                    )
-                    for adapter in get_adapters().values():
-                        if isinstance(adapter, OneBotV11Adapter):
-                            for user_id in user_ids:
-                                await send_private_msg(use=adapter, user_id=user_id,
-                                                       message=notification)
-            await asyncio.sleep(plugin_config.preference.sleep_time)
-
-        if msgs_list:
-            if isinstance(event, OneBotV11GroupMessageEvent):  # 在群聊触发游戏签到将使用合并消息
-                await send_qqGroup(bot, event, msgs_list)
-            else:
-                for msg in msgs_list:
-                    await matcher.send(msg)
-
-        if not games_has_record:
+        async def emit(text, image=None):
             if matcher:
-                await matcher.send(f"⚠️您的米游社账户 {account.display_name} 下不存在任何游戏账号，已跳过签到")
+                messages.append(text + OneBotV11MessageSegment.image(image) if image else text)
             elif user.enable_notice:
-                for user_id in user_ids:
-                    await send_private_msg(
-                        user_id=user_id,
-                        message=f"⚠️您的米游社账户 {account.display_name} 下不存在任何游戏账号，已跳过签到"
-                    )
+                message = MessageUtils.build_message([text, image] if image else text)
+                for recipient in user_ids:
+                    await send_private_msg(user_id=recipient, message=message)
+
+        if not records_status:
+            await emit(f"⚠️账户 {account.display_name} 暂无法验证绑定角色，已跳过游戏签到。")
+        elif not records:
+            await emit(f"⚠️账户 {account.display_name} 未查询到支持的游戏角色。")
+        else:
+            device_ready = device_expired = web_expired = False
+
+            async def prepare_device():
+                nonlocal device_ready, device_expired
+                if device_ready:
+                    return True
+                operation = "安卓签到设备准备"
+                if device_expired or await expiry.skip("app", operation):
+                    device_expired = True
+                    return False
+                for request in (device_login, device_save):
+                    status = await request(account)
+                    if not status:
+                        device_expired = await expiry.handle(status, "app", operation)
+                        return False
+                device_ready = True
+                return True
+
+            for game in sorted(BaseGameSign.available_game_signs, key=lambda item: item.game_id):
+                if game.en_name not in account.game_sign_games:
+                    continue
+                selected = select_game_roles(account, game, records)
+                if selected is None:
+                    await emit(f"⚠️账户 {account.display_name} 的{game.name}需要确认签到角色。"
+                               f"请私聊发送「{COMMAND_BEGIN}签到角色」。")
+                    continue
+                for record in selected:
+                    signer = game(account, [record])
+                    try:
+                        text, image, web_expired = await _sign_role(
+                            signer, account, user, expiry, prepare_device, rewards,
+                            report=bool(matcher or user.enable_notice),
+                        )
+                    except Exception:
+                        logger.exception(f"{game.name}角色签到异常")
+                        text, image = f"⚠️账户 {account.display_name} {game.name} 签到结果暂无法确认。", None
+                    if text:
+                        await emit(text, image)
+                    if web_expired:
+                        break
+                if web_expired:
+                    break
+        if messages:
+            if isinstance(event, OneBotV11GroupMessageEvent):
+                await send_qqGroup(bot, event, messages)
+            else:
+                for message in messages:
+                    await matcher.send(message)
+
+
+async def _sign_role(signer, account, user, expiry, prepare_device, rewards, *, report):
+    prefix = f"🪪账户 {account.display_name}\n🎮{signer.name} · {role_label(signer.record)}"
+    status, info = await signer.get_info(account.platform)
+    if await expiry.handle(status, "web", f"{signer.name}签到查询"):
+        return None, None, True
+    previously_signed = info.is_sign if status and info is not None else None
+    receipt = None
+    if previously_signed is not True:
+        receipt, captcha = await signer.sign(account.platform, prepare_device=prepare_device)
+        if receipt.need_verify and captcha and (plugin_config.preference.geetest_url or user.geetest_url):
+            for _ in range(3):
+                validation = await get_validate(user, captcha.gt, captcha.challenge)
+                if not validation:
+                    continue
+                receipt, captcha = await signer.sign(account.platform, captcha, validation, prepare_device=prepare_device)
+                if not receipt.need_verify or captcha is None:
+                    break
+        if await expiry.handle(receipt, "web", f"{signer.name}签到"):
+            return None, None, True
+        if not report:
+            return None, None, False
+        await asyncio.sleep(plugin_config.preference.sleep_time)
+        final_status, final_info = await signer.get_info(account.platform)
+        if await expiry.handle(final_status, "web", f"{signer.name}签到结果查询"):
+            return (f"{prefix}\n签到已确认，奖励暂未查到。" if receipt else None), None, True
+        info = final_info if final_status else None
+    if not report:
+        return None, None, False
+
+    confirmed = bool(info and info.is_sign) or bool(receipt)
+    if not confirmed:
+        if receipt is not None and receipt.need_verify:
+            message = f"{prefix}\n签到遇到人机验证，请在米游社确认。"
+        elif info is not None:
+            message = f"{prefix}\n今日尚未签到，请稍后重试。"
+        else:
+            message = f"{prefix}\n签到结果暂无法确认。"
+        return message, None, False
+
+    if previously_signed is True:
+        result = "已经签到过了"
+    elif receipt:
+        result = "签到成功"
+    else:
+        result = "今日已签到，无法确认本次新增"
+    text = f"{prefix}\n🎮状态：{result}"
+    if info is None or not info.is_sign:
+        return f"{text}\n🎁奖励暂未查到。", None, False
+    days = info.total_sign_day
+    text += f"\n📅本月签到次数：{days}"
+    try:
+        if signer.en_name not in rewards:
+            reward_status, awards = await signer.get_rewards()
+            if reward_status and awards:
+                rewards[signer.en_name] = awards
+        awards = rewards.get(signer.en_name, [])
+        if not 1 <= days <= len(awards):
+            return f"{text}\n🎁奖励暂未查到。", None, False
+        award = awards[days - 1]
+    except Exception:
+        logger.exception(f"{signer.name}奖励列表读取失败")
+        return f"{text}\n🎁奖励暂未查到。", None, False
+    text += f"\n🎁今日签到奖励：{award.name} × {award.cnt}"
+    try:
+        image = await get_file(award.icon)
+    except Exception:
+        logger.exception(f"{signer.name}签到奖励图片下载失败")
+        image = None
+    return text, image, False
 
 
 async def perform_bbs_sign(
@@ -410,311 +387,255 @@ async def perform_bbs_sign(
         *,
         owner_id: str,
 ):
-    """
-    执行米游币任务函数，并发送给用户任务执行消息。
-
-    :param user: 用户数据
-    :param user_ids: 发送通知的所有用户ID
-    :param matcher: 事件响应器
-    """
     for account in user.accounts.values():
-        # 自动执行米游币任务时，要求用户打开了米游币任务功能；手动执行米游币任务时都可以调用执行。
         if not matcher and not account.enable_mission:
             continue
-
         expiry = CredentialExpiry(owner_id, account, reply=matcher.send if matcher else None)
         if await expiry.skip("app", "米游币任务"):
             continue
-        msgs_list = []
-        missions_state_status, missions_state = await get_missions_state(account)
-        if not missions_state_status:
-            if await expiry.handle(missions_state_status, "app", "查询米游币任务进度"):
-                continue
-            message = f'⚠️账户 {account.display_name} 获取任务完成情况请求失败，你可以手动前往App查看'
-            if matcher:
-                await matcher.send(message, at_sender=True)
-            elif user.enable_notice:
-                for user_id in user_ids:
-                    await send_private_msg(user_id=user_id, message=message)
+
+        status, progress = await get_missions_state(account)
+        if await expiry.handle(status, "app", "查询米游币任务进度"):
             continue
-        myb_before_mission = missions_state.current_myb
-
-        # 在此处进行判断。因为如果在多个分区执行任务，会在完成之前就已经达成米游币任务目标，导致其他分区任务不会执行。
+        initial_points = progress.current_myb if progress is not None else None
+        board_results = []
+        action_results = []
+        known_boards = set()
         login_expired = False
-        finished = all(current == mission.threshold for mission, current in missions_state.state_dict.values())
-        if not finished:
-            if not account.mission_games and matcher:
-                msgs_list.append(
-                    f'⚠️🆔账户 {account.display_name} 未设置米游币任务目标分区，将跳过执行')
-            for class_name in account.mission_games:
-                class_type = BaseMission.available_games.get(class_name)
-                if not class_type:
-                    if matcher:
-                        msgs_list.append(
-                            f'⚠️🆔账户 {account.display_name} 米游币任务目标分区『{class_name}』未找到，将跳过该分区')
+
+        for board in account.mission_games:
+            mission_class = BaseMission.available_games.get(board)
+            if mission_class is None or mission_class.gids in known_boards:
+                continue
+            known_boards.add(mission_class.gids)
+            mission = mission_class(account)
+            try:
+                signed, points = await mission.sign(user)
+            except Exception:
+                logger.exception("分区签到异常")
+                signed, points = MissionStatus(), None
+            mark = "已签到" if signed.already_signed else "✓" if signed else "✕"
+            board_results.append(f"📅{mission.name}签到：{mark}" + (f" +{points} 米游币" if points else ""))
+            if await expiry.handle(signed, "app", "米游币分区签到"):
+                login_expired = True
+                break
+
+            if progress is None:
+                continue
+            actions = (
+                (BaseMission.VIEW, "阅读", mission.read, 5),
+                (BaseMission.LIKE, "点赞", mission.like, 10),
+                (BaseMission.SHARE, "分享", mission.share, 1),
+            )
+            attempted = False
+            results = []
+            for key, label, action, limit in actions:
+                if key in progress.state_dict:
+                    definition, current = progress.state_dict[key]
+                elif key in progress.unconfirmed:
+                    definition, current = progress.unconfirmed[key], 0
+                else:
                     continue
-                mission_obj = class_type(account)
-                if matcher:
-                    msgs_list.append(f'🆔账户 {account.display_name} ⏳开始在分区『{class_type.name}』执行米游币任务...')
-
-                # 执行任务
-                sign_status, read_status, like_status, share_status = (
-                    MissionStatus(),
-                    MissionStatus(),
-                    MissionStatus(),
-                    MissionStatus()
-                )
-                sign_points: Optional[int] = None
-                for key_name in missions_state.state_dict:
-                    if key_name == BaseMission.SIGN:
-                        sign_status, sign_points = await mission_obj.sign(user)
-                        action_status = sign_status
-                    elif key_name == BaseMission.VIEW:
-                        read_status = await mission_obj.read()
-                        action_status = read_status
-                    elif key_name == BaseMission.LIKE:
-                        like_status = await mission_obj.like()
-                        action_status = like_status
-                    elif key_name == BaseMission.SHARE:
-                        share_status = await mission_obj.share()
-                        action_status = share_status
-                    else:
-                        continue
-                    if await expiry.handle(action_status, "app", "米游币任务"):
-                        login_expired = True
-                        break
-
-                if login_expired:
+                remaining = min(limit, max(0, definition.threshold - current))
+                if not remaining:
+                    continue
+                attempted = True
+                try:
+                    action_status = await action() if key == BaseMission.SHARE else await action(remaining)
+                except Exception:
+                    logger.exception(f"米游币{label}任务异常")
+                    action_status = MissionStatus()
+                results.append(f"{label}{'✓' if action_status else '✕'}")
+                if await expiry.handle(action_status, "app", f"米游币{label}"):
+                    login_expired = True
+                    break
+            if results:
+                action_results.append(f"{mission.name} · {' '.join(results)}")
+            if login_expired:
+                break
+            if attempted:
+                status, progress = await get_missions_state(account)
+                if await expiry.handle(status, "app", "查询米游币任务进度"):
+                    login_expired = True
                     break
 
-                if matcher:
-                    msgs_list.append(
-                        f"🆔账户 {account.display_name} 🎮『{class_type.name}』米游币任务执行情况：\n"
-                        f"📅签到：{'✓' if sign_status else '✕'} +{sign_points or '0'} 米游币🪙\n"
-                        f"📰阅读：{'✓' if read_status else '✕'}\n"
-                        f"❤️点赞：{'✓' if like_status else '✕'}\n"
-                        f"↗️分享：{'✓' if share_status else '✕'}"
-                    )
-
-        if login_expired:
+        if not matcher and (not user.enable_notice or (
+            login_expired and not any("✕" not in result for result in board_results)
+        )):
             continue
-
-        # 用户打开通知或手动任务时，进行通知
-        if user.enable_notice or matcher:
-            missions_state_status, missions_state = await get_missions_state(account)
-            if not missions_state_status:
-                if await expiry.handle(missions_state_status, "app", "查询米游币任务结果"):
-                    continue
-                message = f'⚠️账户 {account.display_name} 获取任务完成情况请求失败，你可以手动前往App查看'
-                if matcher:
-                    await matcher.send(message)
-                else:
-                    for user_id in user_ids:
-                        await send_private_msg(user_id=user_id, message=message)
-                continue
-            if all(current == mission.threshold for mission, current in missions_state.state_dict.values()):
-                notice_string = "🎉已完成今日米游币任务"
+        final = None
+        if not login_expired:
+            status, final = await get_missions_state(account)
+            await expiry.handle(status, "app", "查询米游币任务结果")
+        names = {BaseMission.SIGN: "📅签到", BaseMission.VIEW: "📰阅读",
+                 BaseMission.LIKE: "❤️点赞", BaseMission.SHARE: "↗️分享"}
+        if final is None or final.current_myb is None or not (final.state_dict or final.unconfirmed):
+            title = "⚠️今日米游币任务进度暂未查到"
+        elif not final.unconfirmed and all(
+            count >= mission.threshold for mission, count in final.state_dict.values()
+        ) and all("✕" not in result for result in board_results):
+            title = "🎉已完成今日米游币任务"
+        else:
+            title = "⚠️今日米游币任务未全部完成"
+        lines = [title, f"🆔账户 {account.display_name}"]
+        if final is not None:
+            lines.extend(f"{names.get(key, key)}：{'✓' if count >= mission.threshold else '✕'}"
+                         for key, (mission, count) in final.state_dict.items())
+            lines.extend(f"{names.get(key, key)}：暂未查到" for key in final.unconfirmed)
+        lines.extend(board_results)
+        if matcher:
+            lines.extend(action_results)
+        if not board_results and not known_boards:
+            lines.append("未设置可执行的米游币分区。")
+        final_points = final.current_myb if final is not None else None
+        earned = final_points - initial_points if final_points is not None and initial_points is not None else "暂未查到"
+        lines.extend((f"🪙获得米游币: {earned}",
+                      f"💰当前米游币: {final_points if final_points is not None else '暂未查到'}"))
+        if matcher:
+            message = "\n".join(lines)
+            if isinstance(event, OneBotV11GroupMessageEvent):
+                await send_qqGroup(bot, event, [message])
             else:
-                notice_string = "⚠️今日米游币任务未全部完成"
-
-            msg = f"{notice_string}" \
-                  f"\n🆔账户 {account.display_name}"
-            for key_name, (mission, current) in missions_state.state_dict.items():
-                if key_name == BaseMission.SIGN:
-                    mission_name = "📅签到"
-                elif key_name == BaseMission.VIEW:
-                    mission_name = "📰阅读"
-                elif key_name == BaseMission.LIKE:
-                    mission_name = "❤️点赞"
-                elif key_name == BaseMission.SHARE:
-                    mission_name = "↗️分享"
-                else:
-                    mission_name = mission.mission_key
-                msg += f"\n{mission_name}：{'✓' if current >= mission.threshold else '✕'}"
-            msg += f"\n🪙获得米游币: {missions_state.current_myb - myb_before_mission}" \
-                   f"\n💰当前米游币: {missions_state.current_myb}"
-
-            if matcher:
-                msgs_list.append(msg)
-            else:
-                msg += f"\n{web_token_expiry_notice(account.web_scanned_at)}"
-                for user_id in user_ids:
-                    await send_private_msg(user_id=user_id, message=msg)
-
-        if msgs_list:
-            if isinstance(event, OneBotV11GroupMessageEvent):  # 在群聊触发游戏签到将使用合并消息
-                await send_qqGroup(bot, event, msgs_list)
-            else:
-                for msg in msgs_list:
-                    await matcher.send(msg)
+                await matcher.send(message)
+        else:
+            lines.append(web_token_expiry_notice(account.web_scanned_at))
+            for user_id in user_ids:
+                await send_private_msg(user_id=user_id, message="\n".join(lines))
 
 
-async def genshin_note_check(user: UserData, user_ids: Iterable[str], matcher: Matcher = None, *, owner_id: str):
-    """
-    查看原神实时便笺函数，并发送给用户任务执行消息。
+async def _account_notes(account, game, owner_id, matcher, cache):
+    operation = f"查询{game.name}实时便笺"
+    expiry = CredentialExpiry(owner_id, account, reply=matcher.send if matcher else None)
+    if await expiry.skip("web", operation):
+        return []
+    key = (account.bbs_uid, account.device_id_ios, credential_fingerprint(account, "web"))
+    records = cache.get(key)
+    if records is None:
+        status, records = await get_bound_game_roles(account)
+        if not status:
+            if not await expiry.handle(status, "web", operation) and matcher:
+                await matcher.send(f"⚠️账户 {account.display_name} 暂无法验证{game.name}绑定角色。")
+            return []
+        cache[key] = records
+    candidates = [record for record in records if record.game_id == game.game_id]
+    if not candidates:
+        if matcher:
+            await matcher.send(f"⚠️账户 {account.display_name} 没有查询到{game.name}角色。")
+        return []
+    targets = candidates if matcher else select_game_roles(account, game, records)
+    if not targets:
+        return []
+    status, notes, family = await get_role_notes(account, game.game_id, candidates, targets)
+    expired = await expiry.handle(status, family, operation)
+    if matcher:
+        if not notes and not expired:
+            reason = "需要人机验证" if status.need_verify else "暂无法查询"
+            await matcher.send(f"⚠️账户 {account.display_name} 的{game.name}便笺{reason}。")
+        confirmed = {role_key(role) for role, _ in notes if role is not None}
+        missing = [role_label(role) for role in targets if role_key(role) not in confirmed]
+        if notes and missing:
+            await matcher.send(f"以下角色的便笺暂未确认：{'、'.join(missing)}")
+        return notes
+    target_keys = {role_key(role) for role in targets}
+    return [(role, note) for role, note in notes if role is not None and role_key(role) in target_keys]
 
-    :param user: 用户对象
-    :param user_ids: 发送通知的所有用户ID
-    :param matcher: 事件响应器
-    """
+
+async def _send_note(user_ids, matcher, message):
+    if matcher:
+        await matcher.send(message)
+    else:
+        for recipient in user_ids:
+            await send_private_msg(user_id=recipient, message=message)
+
+
+def _note_value(value):
+    return value if value is not None else "未知"
+
+
+async def genshin_note_check(user: UserData, user_ids: Iterable[str], matcher: Matcher = None, *, owner_id: str,
+                             bindings_cache=None):
+    cache = {} if bindings_cache is None else bindings_cache
     for account in user.accounts.values():
-        if (account.enable_resin and 'GenshinImpact' in account.game_sign_games) or matcher:
-            expiry = CredentialExpiry(owner_id, account, reply=matcher.send if matcher else None)
-            if await expiry.skip("combined", "查询原神实时便笺"):
-                continue
-            genshin_board_status, note = await genshin_note(account)
-            if not genshin_board_status:
-                if await expiry.handle(genshin_board_status, "combined", "查询原神实时便笺"):
-                    continue
-                if matcher:
-                    if genshin_board_status.no_genshin_account:
-                        await matcher.send(f'⚠️账户 {account.display_name} 没有绑定任何原神账户，请绑定后再重试')
-                    elif genshin_board_status.need_verify:
-                        await matcher.send(f'⚠️账户 {account.display_name} 获取实时便笺时被人机验证阻拦')
-                    await matcher.send(f'⚠️账户 {account.display_name} 获取实时便笺请求失败，你可以手动前往App查看')
-                continue
-
-            msg = ''
-            # 手动查询体力时，无需判断是否溢出
+        if not matcher and not (account.enable_resin and "GenshinImpact" in account.game_sign_games):
+            continue
+        notes = await _account_notes(account, GenshinImpactSign, owner_id, matcher, cache)
+        for role, note in notes:
+            capacity = note.max_resin or 200
+            alerts = []
             if not matcher:
-                genshin_notice = note_notice_status.setdefault((owner_id, account.bbs_uid), NoteNoticeStatus()).genshin
-                do_notice = False
-                """记录是否需要提醒"""
-                # 体力溢出提醒
-                if note.current_resin >= account.user_resin_threshold:
-                    # 防止重复提醒
-                    if not genshin_notice.current_resin_full:
-                        if note.current_resin == 200:
-                            genshin_notice.current_resin_full = True
-                            msg += '❕您的树脂已经满啦\n'
-                            do_notice = True
-                        elif not genshin_notice.current_resin:
-                            genshin_notice.current_resin_full = False
-                            genshin_notice.current_resin = True
-                            msg += '❕您的树脂已达到提醒阈值\n'
-                            do_notice = True
+                key = (owner_id, account.bbs_uid, GenshinImpactSign.game_id, *role_key(role))
+                notice = note_notice_status.setdefault(key, NoteNoticeStatus()).genshin
+                if note.current_resin >= capacity:
+                    if not notice.current_resin_full:
+                        alerts.append("❕您的树脂已经满啦")
+                    notice.current_resin_full = True
+                elif note.current_resin >= account.user_resin_threshold:
+                    if not notice.current_resin:
+                        alerts.append("❕您的树脂已达到提醒阈值")
+                    notice.current_resin, notice.current_resin_full = True, False
                 else:
-                    genshin_notice.current_resin = False
-                    genshin_notice.current_resin_full = False
-
-                # 洞天财瓮溢出提醒
-                if note.current_home_coin == note.max_home_coin:
-                    # 防止重复提醒
-                    if not genshin_notice.current_home_coin:
-                        genshin_notice.current_home_coin = True
-                        msg += '❕您的洞天财瓮已经满啦\n'
-                        do_notice = True
-                else:
-                    genshin_notice.current_home_coin = False
-
-                # 参量质变仪就绪提醒
+                    notice.current_resin = notice.current_resin_full = False
+                if note.current_home_coin is not None and note.max_home_coin:
+                    is_full = note.current_home_coin >= note.max_home_coin
+                    if is_full and not notice.current_home_coin:
+                        alerts.append("❕您的洞天财瓮已经满啦")
+                    notice.current_home_coin = is_full
                 if note.transformer:
-                    if note.transformer_text == '已准备就绪':
-                        # 防止重复提醒
-                        if not genshin_notice.transformer:
-                            genshin_notice.transformer = True
-                            msg += '❕您的参量质变仪已准备就绪\n\n'
-                            do_notice = True
-                    else:
-                        genshin_notice.transformer = False
-                else:
-                    genshin_notice.transformer = True
-
-                if not do_notice:
-                    logger.info(f"原神实时便笺：账户 {account.display_name} 树脂:{note.current_resin},未满足推送条件")
+                    ready = note.transformer_text == "已准备就绪"
+                    if ready and not notice.transformer:
+                        alerts.append("❕您的参量质变仪已准备就绪")
+                    notice.transformer = ready
+                if not alerts:
                     continue
-
-            msg += "❖原神·实时便笺❖" \
-                   f"\n🆔账户 {account.display_name}" \
-                   f"\n⏳树脂数量：{note.current_resin} / 200" \
-                   f"\n⏱️树脂{note.resin_recovery_text}" \
-                   f"\n🕰️探索派遣：{note.current_expedition_num} / {note.max_expedition_num}" \
-                   f"\n📅每日委托：{4 - note.finished_task_num} 个任务未完成" \
-                   f"\n💰洞天财瓮：{note.current_home_coin} / {note.max_home_coin}" \
-                   f"\n🎰参量质变仪：{note.transformer_text if note.transformer else 'N/A'}"
-            if matcher:
-                await matcher.send(msg)
-            else:
-                for user_id in user_ids:
-                    await send_private_msg(user_id=user_id, message=msg)
+            tasks = 4 - note.finished_task_num if note.finished_task_num is not None else "未知"
+            lines = [*alerts, "❖原神·实时便笺❖", f"🆔账户 {account.display_name}",
+                     f"角色：{role_label(role) if role else '角色未确认'}",
+                     f"⏳树脂数量：{note.current_resin} / {capacity}", f"⏱️树脂{note.resin_recovery_text}",
+                     f"🕰️探索派遣：{_note_value(note.current_expedition_num)} / {_note_value(note.max_expedition_num)}",
+                     f"📅每日委托：{tasks} 个任务未完成",
+                     f"💰洞天财瓮：{_note_value(note.current_home_coin)} / {_note_value(note.max_home_coin)}",
+                     f"🎰参量质变仪：{note.transformer_text if note.transformer else '未知'}"]
+            await _send_note(user_ids, matcher, "\n".join(lines))
 
 
-async def starrail_note_check(user: UserData, user_ids: Iterable[str], matcher: Matcher = None, *, owner_id: str):
-    """
-    查看星铁实时便笺函数，并发送给用户任务执行消息。
-
-    :param user: 用户对象
-    :param user_ids: 发送通知的所有用户ID
-    :param matcher: 事件响应器
-    """
+async def starrail_note_check(user: UserData, user_ids: Iterable[str], matcher: Matcher = None, *, owner_id: str,
+                              bindings_cache=None):
+    cache = {} if bindings_cache is None else bindings_cache
     for account in user.accounts.values():
-        if (account.enable_resin and 'StarRail' in account.game_sign_games) or matcher:
-            expiry = CredentialExpiry(owner_id, account, reply=matcher.send if matcher else None)
-            if await expiry.skip("combined", "查询星穹铁道实时便笺"):
-                continue
-            starrail_board_status, note = await starrail_note(account)
-            if not starrail_board_status:
-                if await expiry.handle(starrail_board_status, "combined", "查询星穹铁道实时便笺"):
-                    continue
-                if matcher:
-                    if starrail_board_status.no_starrail_account:
-                        await matcher.send(f'⚠️账户 {account.display_name} 没有绑定任何星铁账户，请绑定后再重试')
-                    elif starrail_board_status.need_verify:
-                        await matcher.send(f'⚠️账户 {account.display_name} 获取实时便笺时被人机验证阻拦')
-                    await matcher.send(f'⚠️账户 {account.display_name} 获取实时便笺请求失败，你可以手动前往App查看')
-                continue
-
-            msg = ''
-            # 手动查询体力时，无需判断是否溢出
+        if not matcher and not (account.enable_resin and "StarRail" in account.game_sign_games):
+            continue
+        notes = await _account_notes(account, StarRailSign, owner_id, matcher, cache)
+        for role, note in notes:
+            alerts = []
             if not matcher:
-                starrail_notice = note_notice_status.setdefault((owner_id, account.bbs_uid), NoteNoticeStatus()).starrail
-                do_notice = False
-                """记录是否需要提醒"""
-                # 体力溢出提醒
-                if note.current_stamina >= account.user_stamina_threshold:
-                    # 防止重复提醒
-                    if not starrail_notice.current_stamina_full:
-                        if note.current_stamina >= note.max_stamina:
-                            starrail_notice.current_stamina_full = True
-                            msg += '❕您的开拓力已经溢出\n'
-                            if note.current_train_score != note.max_train_score:
-                                msg += '❕您的每日实训未完成\n'
-                            do_notice = True
-                        elif not starrail_notice.current_stamina:
-                            starrail_notice.current_stamina_full = False
-                            starrail_notice.current_stamina = True
-                            msg += '❕您的开拓力已达到提醒阈值\n'
-                            if note.current_train_score != note.max_train_score:
-                                msg += '❕您的每日实训未完成\n'
-                            do_notice = True
+                key = (owner_id, account.bbs_uid, StarRailSign.game_id, *role_key(role))
+                notice = note_notice_status.setdefault(key, NoteNoticeStatus()).starrail
+                if note.max_stamina is not None and note.current_stamina >= note.max_stamina:
+                    if not notice.current_stamina_full:
+                        alerts.append("❕您的开拓力已经溢出")
+                    notice.current_stamina_full = True
+                elif note.current_stamina >= account.user_stamina_threshold:
+                    if not notice.current_stamina:
+                        alerts.append("❕您的开拓力已达到提醒阈值")
+                    notice.current_stamina, notice.current_stamina_full = True, False
                 else:
-                    starrail_notice.current_stamina = False
-                    starrail_notice.current_stamina_full = False
-
-                # 每周模拟宇宙积分提醒
-                if note.current_rogue_score != note.max_rogue_score:
-                    if plugin_config.preference.notice_time:
-                        msg += '❕您的模拟宇宙积分还没打满\n\n'
-                        do_notice = True
-
-                if not do_notice:
-                    logger.info(
-                        f"崩铁实时便笺：账户 {account.display_name} 开拓力:{note.current_stamina},未满足推送条件")
+                    notice.current_stamina = notice.current_stamina_full = False
+                if alerts and note.current_train_score is not None and note.max_train_score is not None:
+                    if note.current_train_score < note.max_train_score:
+                        alerts.append("❕您的每日实训未完成")
+                if plugin_config.preference.notice_time and note.current_rogue_score is not None:
+                    if note.max_rogue_score is not None and note.current_rogue_score < note.max_rogue_score:
+                        alerts.append("❕您的模拟宇宙积分还没打满")
+                if not alerts:
                     continue
-
-            msg += "❖星穹铁道·实时便笺❖" \
-                   f"\n🆔账户 {account.display_name}" \
-                   f"\n⏳开拓力数量：{note.current_stamina} / {note.max_stamina}" \
-                   f"\n⏱开拓力{note.stamina_recover_text}" \
-                   f"\n📒每日实训：{note.current_train_score} / {note.max_train_score}" \
-                   f"\n📅每日委托：{note.accepted_expedition_num} / 4" \
-                   f"\n🌌模拟宇宙：{note.current_rogue_score} / {note.max_rogue_score}"
-
-            if matcher:
-                await matcher.send(msg)
-            else:
-                for user_id in user_ids:
-                    await send_private_msg(user_id=user_id, message=msg)
+            lines = [*alerts, "❖星穹铁道·实时便笺❖", f"🆔账户 {account.display_name}",
+                     f"角色：{role_label(role) if role else '角色未确认'}",
+                     f"⏳开拓力数量：{note.current_stamina} / {_note_value(note.max_stamina)}",
+                     f"⏱开拓力{note.stamina_recover_text}",
+                     f"📒每日实训：{_note_value(note.current_train_score)} / {_note_value(note.max_train_score)}",
+                     f"📅每日委托：{_note_value(note.accepted_expedition_num)} / {_note_value(note.total_expedition_num or 4)}",
+                     f"🌌模拟宇宙：{_note_value(note.current_rogue_score)} / {_note_value(note.max_rogue_score)}"]
+            await _send_note(user_ids, matcher, "\n".join(lines))
 
 
 async def send_qqGroup(bot, event, msgs_list):
@@ -749,8 +670,13 @@ async def daily_schedule():
     logger.info(f"{plugin_config.preference.log_head}开始执行每日自动任务")
     for user_id, user in get_unique_users():
         user_ids = [user_id] + list(get_all_bind(user_id))
-        await perform_game_sign(user=user, user_ids=user_ids, owner_id=user_id)
-        await perform_bbs_sign(user=user, user_ids=user_ids, owner_id=user_id)
+        for uid, account in user.accounts.items():
+            account_user = user.copy(update={"accounts": {uid: account}})
+            for task in (perform_game_sign, perform_bbs_sign):
+                try:
+                    await task(user=account_user, user_ids=user_ids, owner_id=user_id)
+                except Exception:
+                    logger.exception(f"{task.__name__}执行异常，继续处理其他账号和任务")
     logger.info(f"{plugin_config.preference.log_head}每日自动任务执行完成")
 
 
@@ -765,6 +691,12 @@ async def auto_note_check():
     logger.info(f"{plugin_config.preference.log_head}开始执行自动便笺检查")
     for user_id, user in get_unique_users():
         user_ids = [user_id] + list(get_all_bind(user_id))
-        await genshin_note_check(user=user, user_ids=user_ids, owner_id=user_id)
-        await starrail_note_check(user=user, user_ids=user_ids, owner_id=user_id)
+        cache = {}
+        for uid, account in user.accounts.items():
+            account_user = user.copy(update={"accounts": {uid: account}})
+            for task in (genshin_note_check, starrail_note_check):
+                try:
+                    await task(user=account_user, user_ids=user_ids, owner_id=user_id, bindings_cache=cache)
+                except Exception:
+                    logger.exception(f"{task.__name__}执行异常，继续处理其他账号")
     logger.info(f"{plugin_config.preference.log_head}自动便笺检查执行完成")

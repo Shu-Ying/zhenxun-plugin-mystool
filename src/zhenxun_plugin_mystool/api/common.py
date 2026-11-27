@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import List, Optional, Tuple, Dict, Any, Union, Type
@@ -27,6 +28,7 @@ URL_STOKEN_V2_BY_V1 = "https://passport-api.mihoyo.com/account/ma-cn-session/app
 URL_ACTION_TICKET = ("https://api-takumi.mihoyo.com/auth/api/getActionTicketBySToken?action_type=game_role"
                      "&stoken={stoken}&uid={bbs_uid}")
 URL_GAME_RECORD = "https://api-takumi-record.mihoyo.com/game_record/card/wapi/getGameRecordCard?uid={}"
+URL_BOUND_GAME_ROLES = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"
 URL_GAME_LIST = "https://bbs-api.mihoyo.com/apihub/api/getGameList"
 URL_MYB = "https://api-takumi.mihoyo.com/common/homutreasure/v1/web/user/point?app_id=1&point_sn=myb"
 URL_DEVICE_LOGIN = "https://bbs-api.mihoyo.com/apihub/api/deviceLogin"
@@ -464,6 +466,56 @@ async def get_game_record(account: UserAccount, retry: bool = True) -> Tuple[Bas
             return BaseApiStatus(network_error=True), None
 
 
+_ROLE_GAME_IDS = {"bh3": 1, "hk4e": 2, "bh2": 3, "nxx": 4, "hkrpg": 6, "nap": 8, "zzz": 8}
+
+
+def role_game_id(game_biz):
+    return _ROLE_GAME_IDS.get(game_biz.split("_", 1)[0]) if game_biz else None
+
+
+async def get_bound_game_roles(account: UserAccount) -> Tuple[BaseApiStatus, Optional[List[GameRecord]]]:
+    if not account.cookies.has_credentials("web"):
+        return BaseApiStatus(), None
+    headers = {**HEADERS_API_TAKUMI_MOBILE, "x-rpc-device_id": account.device_id_ios}
+    headers["DS"] = generate_ds(salt=plugin_env.salt_config.SALT_PARAMS, ds2=True)
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                URL_BOUND_GAME_ROLES, headers=headers, cookies=account.cookies.request_cookies("web"),
+                timeout=plugin_config.preference.timeout,
+            )
+        if response.status_code != 200:
+            return BaseApiStatus(incorrect_return=True), None
+        result = ApiResultHandler(response.json())
+        if result.login_expired:
+            return BaseApiStatus(login_expired=True), None
+        if result.retcode != 0 or not isinstance(result.data, dict):
+            return BaseApiStatus(incorrect_return=True), None
+        roles = result.data.get("list")
+        if not isinstance(roles, list):
+            return BaseApiStatus(incorrect_return=True), None
+        records = {}
+        for item in roles:
+            if not isinstance(item, dict) or not isinstance(item.get("game_biz"), str):
+                return BaseApiStatus(incorrect_return=True), None
+            game_id = role_game_id(item["game_biz"])
+            if game_id is None:
+                continue
+            if not item.get("region") or not item.get("game_uid"):
+                return BaseApiStatus(incorrect_return=True), None
+            record = GameRecord(
+                game_id=game_id, game_role_id=item["game_uid"], region=item["region"],
+                region_name=item.get("region_name") or item["region"],
+                nickname=item.get("nickname") or "未命名角色", level=item.get("level", 0),
+            )
+            records[(game_id, record.region, record.game_role_id)] = record
+        return BaseApiStatus(success=True), list(records.values())
+    except (ValueError, TypeError, AttributeError):
+        return BaseApiStatus(incorrect_return=True), None
+    except httpx.HTTPError:
+        return BaseApiStatus(network_error=True), None
+
+
 async def get_game_list(retry: bool = True) -> Tuple[BaseApiStatus, Optional[List[GameInfo]]]:
     """
     获取米哈游游戏的详细信息，若返回`None`说明获取失败
@@ -510,6 +562,8 @@ async def get_user_myb(account: UserAccount, retry: bool = True) -> Tuple[BaseAp
                         f"获取用户米游币 - 用户 {account.display_name} 登录失效")
                     logger.debug(f"网络请求返回: {res.text}")
                     return BaseApiStatus(login_expired=True), None
+                if res.status_code != 200 or api_result.retcode not in (0, 1):
+                    return BaseApiStatus(incorrect_return=True), None
                 return BaseApiStatus(success=True), int(api_result.data["points"])
     except tenacity.RetryError as e:
         if is_incorrect_return(e):
@@ -1381,274 +1435,173 @@ async def get_device_fp(device_id: str, retry: bool = True) -> Tuple[GetFpStatus
 
 
 async def good_exchange(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[ExchangeResult]]:
-    """
-    执行米游币商品兑换
-
-    :param plan: 兑换计划
-    """
-    headers = HEADERS_EXCHANGE.copy()
-    headers["x-rpc-device_id"] = plan.account.device_id_ios
-    headers["x-rpc-device_fp"] = plan.account.device_fp or generate_fp_locally()
-    content = {
-        "app_id": 1,
-        "point_sn": "myb",
-        "goods_id": plan.good.goods_id,
-        "exchange_num": 1
-    }
-    if plan.address is not None:
-        content.setdefault("address_id", plan.address.id)
-    if plan.game_record is not None:
-        content.setdefault("uid", plan.game_record.game_role_id)
-        # 例: cn_gf01
-        content.setdefault("region", plan.game_record.region)
-        # 例: hk4e_cn
-        content.setdefault("game_biz", plan.good.game_biz)
-    start_time = 0
-    try:
-        start_time = time.time()
-        async with httpx.AsyncClient() as client:
-            res = await client.post(
-                URL_EXCHANGE, headers=headers, json=content,
-                cookies=plan.account.cookies.request_cookies("combined"),
-                timeout=plugin_config.preference.timeout)
-        api_result = ApiResultHandler(res.json())
-        if api_result.login_expired:
-            logger.info(
-                f"米游币商品兑换 - 执行兑换: 用户 {plan.account.display_name} 登录失效 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(login_expired=True), None
-        if api_result.success:
-            logger.info(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 兑换成功！可以自行确认 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(success=True), ExchangeResult(result=True, return_data=res.json(), plan=plan)
-        else:
-            logger.info(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 兑换失败，可以自行确认 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(success=True), ExchangeResult(result=False, return_data=res.json(), plan=plan)
-    except Exception as e:
-        if is_incorrect_return(e):
-            logger.error(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 服务器没有正确返回 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(incorrect_return=True), None
-        else:
-            logger.exception(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 请求失败 - 请求发送时间: {start_time}")
-            return ExchangeStatus(network_error=True), None
+    return await asyncio.to_thread(good_exchange_sync, plan)
 
 
 def good_exchange_sync(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[ExchangeResult]]:
-    """
-    执行米游币商品兑换
-
-    :param plan: 兑换计划
-    """
     headers = HEADERS_EXCHANGE.copy()
     headers["x-rpc-device_id"] = plan.account.device_id_ios
     headers["x-rpc-device_fp"] = plan.account.device_fp or generate_fp_locally()
-    content = {
-        "app_id": 1,
-        "point_sn": "myb",
-        "goods_id": plan.good.goods_id,
-        "exchange_num": 1
-    }
-    if plan.address is not None:
-        content.setdefault("address_id", plan.address.id)
-    if plan.game_record is not None:
-        content.setdefault("uid", plan.game_record.game_role_id)
-        # 例: cn_gf01
-        content.setdefault("region", plan.game_record.region)
-        # 例: hk4e_cn
-        content.setdefault("game_biz", plan.good.game_biz)
-    start_time = 0
+    content = {"app_id": 1, "point_sn": "myb", "goods_id": plan.good.goods_id, "exchange_num": 1}
+    if plan.good.is_virtual and plan.game_record is not None:
+        content.update(uid=plan.game_record.game_role_id, region=plan.game_record.region,
+                       game_biz=plan.good.game_biz)
+    elif plan.address is not None:
+        content["address_id"] = plan.address.id
     try:
-        start_time = time.time()
         with httpx.Client() as client:
-            res = client.post(
+            response = client.post(
                 URL_EXCHANGE, headers=headers, json=content,
                 cookies=plan.account.cookies.request_cookies("combined"),
-                timeout=plugin_config.preference.timeout)
-        api_result = ApiResultHandler(res.json())
-        if api_result.login_expired:
-            logger.info(
-                f"米游币商品兑换 - 执行兑换: 用户 {plan.account.display_name} 登录失效 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(login_expired=True), None
-        if api_result.success:
-            logger.info(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 兑换成功！可以自行确认 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(success=True), ExchangeResult(result=True, return_data=res.json(), plan=plan)
-        else:
-            logger.info(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 兑换失败，可以自行确认 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
-            return ExchangeStatus(success=True), ExchangeResult(result=False, return_data=res.json(), plan=plan)
-    except Exception as e:
-        if is_incorrect_return(e):
-            logger.error(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 服务器没有正确返回 - 请求发送时间: {start_time}")
-            logger.debug(f"网络请求返回: {res.text}")
+                timeout=plugin_config.preference.timeout,
+            )
+        if response.status_code != 200:
             return ExchangeStatus(incorrect_return=True), None
-        else:
-            logger.exception(
-                f"米游币商品兑换: 用户 {plan.account.display_name} 商品 {plan.good.goods_id} 请求失败 - 请求发送时间: {start_time}")
-            return ExchangeStatus(network_error=True), None
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return ExchangeStatus(incorrect_return=True), None
+        code = payload.get("retcode")
+        if code in (-100, 10001) and type(code) is int:
+            return ExchangeStatus(login_expired=True), None
+        # Accept the endpoint's success envelope, not a generic "OK" message
+        # attached to an unknown code or a gateway response.
+        if type(code) is int and code in (0, 1) and payload.get("message") in ("OK", "成功"):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                return ExchangeStatus(success=True), ExchangeResult(
+                    result=True, return_data=payload, plan=plan,
+                )
+        return ExchangeStatus(incorrect_return=True), None
+    except (ValueError, TypeError):
+        return ExchangeStatus(incorrect_return=True), None
+    except httpx.HTTPError as exc:
+        logger.warning(f"米游币兑换响应无法确认：{type(exc).__name__}")
+        return ExchangeStatus(network_error=True), None
 
 
-async def genshin_note(account: UserAccount) -> Tuple[
-    Union[BaseApiStatus, GenshinNoteStatus],
-    Optional[GenshinNote]
-]:
-    """
-    获取原神实时便笺
+async def _fetch_note(client, url, headers, cookies, params=None):
+    try:
+        response = await client.get(url, headers=headers, cookies=cookies, params=params,
+                                    timeout=plugin_config.preference.timeout)
+        if response.status_code != 200:
+            return BaseApiStatus(incorrect_return=True), None
+        result = ApiResultHandler(response.json())
+        if result.login_expired:
+            return BaseApiStatus(login_expired=True), None
+        if result.retcode == 1034:
+            return BaseApiStatus(need_verify=True), None
+        if result.invalid_ds:
+            return BaseApiStatus(invalid_ds=True), None
+        if result.retcode not in (0, 1) or not isinstance(result.data, dict):
+            return BaseApiStatus(incorrect_return=True), None
+        return BaseApiStatus(success=True), result.data
+    except (ValueError, TypeError, AttributeError):
+        return BaseApiStatus(incorrect_return=True), None
+    except httpx.HTTPError:
+        return BaseApiStatus(network_error=True), None
 
-    :param account: 用户账户数据
-    """
-    game_record_status, records = await get_game_record(account)
-    if not game_record_status:
-        return GenshinNoteStatus(game_record_failed=True, **game_record_status.dict()), None
-    game_list_status, game_list = await get_game_list()
-    if not game_list_status:
-        return GenshinNoteStatus(game_list_failed=True, **game_list_status.dict()), None
-    game_filter = filter(lambda x: x.en_name == 'ys', game_list)
-    game_info = next(game_filter, None)
-    if not game_info:
-        return GenshinNoteStatus(no_genshin_account=True), None
+
+def _note_role(data, candidates, *, default=None):
+    info = data.get("role")
+    if not isinstance(info, dict):
+        info = data
+    role_id = info.get("role_id") or info.get("game_uid")
+    region = info.get("server") or info.get("region")
+    if default is not None:
+        if role_id is not None and str(role_id) != default.game_role_id:
+            return None
+        if region is not None and region != default.region:
+            return None
+        return default
+    return next((record for record in candidates if
+                 str(role_id) == record.game_role_id and region == record.region), None)
+
+
+async def get_role_notes(account, game_id, candidates, targets):
+    is_genshin = game_id == 2
+    if is_genshin:
+        bbs_url, widget_url = URL_GENSHEN_NOTE_BBS, URL_GENSHEN_NOTE_WIDGET
+        bbs_headers, widget_headers = HEADERS_GENSHIN_STATUS_BBS, HEADERS_GENSHIN_STATUS_WIDGET
+        model, essential = GenshinNote, "current_resin"
     else:
-        game_id = game_info.id
-    flag = True
-    for record in records:
-        if record.game_id == game_id:
-            try:
-                flag = False
-                params = {"role_id": record.game_role_id, "server": record.region}
-                headers = HEADERS_GENSHIN_STATUS_BBS.copy()
-                headers["x-rpc-device_id"] = account.device_id_android
-                headers["x-rpc-device_fp"] = account.device_id_android or generate_fp_locally()
-                async for attempt in get_async_retry(False):
-                    with attempt:
-                        headers["DS"] = generate_ds(
-                            params={"role_id": record.game_role_id, "server": record.region})
-                        async with httpx.AsyncClient() as client:
-                            res = await client.get(
-                                URL_GENSHEN_NOTE_BBS,
-                                headers=headers,
-                                cookies=account.cookies.request_cookies("combined"),
-                                params=params,
-                                timeout=plugin_config.preference.timeout
-                            )
-                        api_result = ApiResultHandler(res.json())
-                        if api_result.login_expired:
-                            logger.info(
-                                f"原神实时便笺: 用户 {account.display_name} 登录失效")
-                            logger.debug(f"网络请求返回: {res.text}")
-                            return GenshinNoteStatus(login_expired=True), None
+        bbs_url, widget_url = URL_STARRAIL_NOTE_BBS, URL_STARRAIL_NOTE_WIDGET
+        bbs_headers = {k: v for k, v in HEADERS_API_TAKUMI_MOBILE.items() if k != "Host"}
+        widget_headers = HEADERS_STARRAIL_STATUS_WIDGET
+        model, essential = StarRailNote, "current_stamina"
 
-                        if api_result.invalid_ds:
-                            logger.info(
-                                f"原神实时便笺: 用户 {account.display_name} DS 校验失败")
-                            logger.debug(f"网络请求返回: {res.text}")
-                        if api_result.retcode == 1034:
-                            logger.info(
-                                f"原神实时便笺: 用户 {account.display_name} 可能被验证码阻拦")
-                            logger.debug(f"网络请求返回: {res.text}")
-                        if not api_result.success:
-                            headers["DS"] = generate_ds()
-                            headers["x-rpc-device_id"] = account.device_id_ios
-                            async with httpx.AsyncClient() as client:
-                                res = await client.get(
-                                    URL_GENSHEN_NOTE_WIDGET,
-                                    headers=headers,
-                                    cookies=account.cookies.request_cookies("combined"),
-                                    timeout=plugin_config.preference.timeout
-                                )
-                            api_result = ApiResultHandler(res.json())
-                            if api_result.login_expired:
-                                return GenshinNoteStatus(login_expired=True), None
-                            if api_result.invalid_ds:
-                                return GenshinNoteStatus(invalid_ds=True), None
-                            if api_result.retcode == 1034:
-                                return GenshinNoteStatus(need_verify=True), None
-                        return GenshinNoteStatus(success=True), GenshinNote.parse_obj(api_result.data)
-            except tenacity.RetryError as e:
-                if is_incorrect_return(e):
-                    logger.exception(f"原神实时便笺: 服务器没有正确返回")
-                    logger.debug(f"网络请求返回: {res.text}")
-                    return GenshinNoteStatus(incorrect_return=True), None
-                else:
-                    logger.exception(f"原神实时便笺: 请求失败")
-                    return GenshinNoteStatus(network_error=True), None
-    if flag:
-        return GenshinNoteStatus(no_genshin_account=True), None
+    def parse(data):
+        if data is None or data.get(essential) is None:
+            return None
+        try:
+            return model.parse_obj(data)
+        except ValidationError:
+            return None
+
+    notes, missing = [], []
+    status = BaseApiStatus(incorrect_return=True)
+    async with httpx.AsyncClient() as client:
+        for target in targets:
+            params = {"role_id": target.game_role_id, "server": target.region}
+            headers = {**bbs_headers, "DS": generate_ds(params=params)}
+            headers["x-rpc-device_id"] = account.device_id_android if is_genshin else account.device_id_ios
+            if is_genshin and account.device_id_android:
+                headers["x-rpc-device_fp"] = account.device_id_android
+            status, data = await _fetch_note(
+                client, bbs_url, headers, account.cookies.request_cookies("web"), params,
+            )
+            note = parse(data)
+            if note is not None and _note_role(data, [target], default=target) is not None:
+                notes.append((target, note))
+            else:
+                missing.append(target)
+            if status.login_expired:
+                return status, notes, "web"
+
+        if missing or not targets:
+            headers = {**widget_headers, "x-rpc-device_id": account.device_id_ios}
+            headers["DS"] = generate_ds() if is_genshin else generate_ds(data={})
+            if account.device_fp:
+                headers["x-rpc-device_fp"] = account.device_fp
+            status, data = await _fetch_note(
+                client, widget_url, headers, account.cookies.request_cookies("combined"),
+            )
+            note = parse(data)
+            if note is not None:
+                # Widget requests carry no target. The payload itself must
+                # identify both the role and region before it can drive alerts.
+                role = _note_role(data, candidates)
+                if role is None or role in missing or (not targets and not notes):
+                    notes.append((role, note))
+            elif status:
+                status = BaseApiStatus(incorrect_return=True)
+            return status, notes, "combined"
+    return status, notes, "web"
 
 
-async def starrail_note(account: UserAccount) -> Tuple[
-    Union[BaseApiStatus, StarRailNoteStatus],
-    Optional[StarRailNote]
-]:
-    """
-    获取崩铁实时便笺
+async def _single_game_note(account, *, game_id, status_type, missing):
+    status, records = await get_bound_game_roles(account)
+    if not status:
+        return status_type(game_record_failed=True, **status.dict()), None
+    candidates = [record for record in records if record.game_id == game_id]
+    if not candidates:
+        return status_type(**{missing: True}), None
+    status, notes, _ = await get_role_notes(
+        account, game_id, candidates, candidates if len(candidates) == 1 else [],
+    )
+    if notes:
+        role, note = notes[0]
+        return status_type(success=True, role=role), note
+    return status_type(**status.dict()), None
 
-    :param account: 用户账户数据
-    """
-    game_record_status, records = await get_game_record(account)
-    if not game_record_status:
-        return StarRailNoteStatus(game_record_failed=True, **game_record_status.dict()), None
-    game_list_status, game_list = await get_game_list()
-    if not game_list_status:
-        return StarRailNoteStatus(game_list_failed=True, **game_list_status.dict()), None
-    game_filter = filter(lambda x: x.en_name == 'sr', game_list)
-    game_info = next(game_filter, None)
-    if not game_info:
-        return StarRailNoteStatus(no_starrail_account=True), None
-    else:
-        game_id = game_info.id
-    flag = True
-    for record in records:
-        if record.game_id == game_id:
-            try:
-                flag = False
-                headers = HEADERS_STARRAIL_STATUS_WIDGET.copy()
-                url = f"{URL_STARRAIL_NOTE_WIDGET}"
-                async for attempt in get_async_retry(False):
-                    with attempt:
-                        headers["DS"] = generate_ds(data={})
-                        async with httpx.AsyncClient() as client:
-                            cookies = account.cookies.request_cookies("combined")
-                            res = await client.get(url, headers=headers,
-                                                   cookies=cookies,
-                                                   timeout=plugin_config.preference.timeout)
-                        api_result = ApiResultHandler(res.json())
-                        if api_result.login_expired:
-                            logger.info(
-                                f"崩铁实时便笺: 用户 {account.display_name} 登录失效")
-                            logger.debug(f"网络请求返回: {res.text}")
-                            return StarRailNoteStatus(login_expired=True), None
 
-                        if api_result.invalid_ds:
-                            logger.info(
-                                f"崩铁实时便笺: 用户 {account.display_name} DS 校验失败")
-                            logger.debug(f"网络请求返回: {res.text}")
-                            return StarRailNoteStatus(invalid_ds=True), None
-                        if api_result.retcode == 1034:
-                            logger.info(
-                                f"崩铁实时便笺: 用户 {account.display_name} 可能被验证码阻拦")
-                            logger.debug(f"网络请求返回: {res.text}")
-                            return StarRailNoteStatus(need_verify=True), None
-                        return StarRailNoteStatus(success=True), StarRailNote.parse_obj(api_result.data)
-            except tenacity.RetryError as e:
-                if is_incorrect_return(e):
-                    logger.exception("崩铁实时便笺: 服务器没有正确返回")
-                    logger.debug(f"网络请求返回: {res.text}")
-                    return StarRailNoteStatus(incorrect_return=True), None
-                else:
-                    logger.exception("崩铁实时便笺: 请求失败")
-                    return StarRailNoteStatus(network_error=True), None
-    if flag:
-        return StarRailNoteStatus(no_starrail_account=True), None
+async def genshin_note(account: UserAccount):
+    return await _single_game_note(account, game_id=2, status_type=GenshinNoteStatus,
+                                   missing="no_genshin_account")
+
+
+async def starrail_note(account: UserAccount):
+    return await _single_game_note(account, game_id=6, status_type=StarRailNoteStatus,
+                                   missing="no_starrail_account")
 
 
 async def create_verification(

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from importlib import import_module
 import json
 from types import SimpleNamespace
@@ -133,7 +133,7 @@ def test_note_preserves_game_record_failure_reason(mystool, monkeypatch, note_ap
     async def failed_record(account):
         return api.BaseApiStatus(**{flag: True}), None
 
-    monkeypatch.setattr(api, "get_game_record", failed_record)
+    monkeypatch.setattr(api, "get_bound_game_roles", failed_record)
     status, note = asyncio.run(getattr(api, note_api)(make_account(mystool)))
     assert note is None
     assert status.game_record_failed
@@ -146,9 +146,6 @@ def test_genshin_widget_preserves_explicit_auth_error(mystool, monkeypatch):
     async def game_record(account):
         return api.BaseApiStatus(success=True), [SimpleNamespace(game_id=2, game_role_id="123", region="cn_gf01")]
 
-    async def game_list():
-        return api.BaseApiStatus(success=True), [SimpleNamespace(id=2, en_name="ys")]
-
     def respond(request):
         if request.url.path.endswith("/dailyNote"):
             return httpx.Response(200, json={"retcode": 1034, "message": "need verify", "data": {}})
@@ -157,8 +154,7 @@ def test_genshin_widget_preserves_explicit_auth_error(mystool, monkeypatch):
 
     client = httpx.AsyncClient
     monkeypatch.setattr(api.httpx, "AsyncClient", lambda: client(transport=httpx.MockTransport(respond)))
-    monkeypatch.setattr(api, "get_game_record", game_record)
-    monkeypatch.setattr(api, "get_game_list", game_list)
+    monkeypatch.setattr(api, "get_bound_game_roles", game_record)
     status, note = asyncio.run(api.genshin_note(make_account(mystool)))
     assert status.login_expired
     assert note is None
@@ -175,7 +171,7 @@ def test_mission_action_expiry_stops_followup_calls(expiry_state, mystool, monke
     async def state(_):
         calls.append("state")
         return model.BaseApiStatus(success=True), SimpleNamespace(
-            current_myb=0,
+            current_myb=0, unconfirmed={},
             state_dict={
                 plan.BaseMission.SIGN: (SimpleNamespace(threshold=1), 0),
                 plan.BaseMission.VIEW: (SimpleNamespace(threshold=1), 0),
@@ -183,6 +179,7 @@ def test_mission_action_expiry_stops_followup_calls(expiry_state, mystool, monke
         )
 
     class Mission:
+        gids = 1
         name = "测试分区"
 
         def __init__(self, account):
@@ -211,17 +208,19 @@ def test_game_sign_info_auth_error_stops_only_web_calls(expiry_state, mystool, m
     user = plan.UserData(accounts={"123": account})
     calls = []
 
+    record = SimpleNamespace(game_id=2, nickname="测试", region_name="测试区", game_role_id="123", level=10)
+
     async def game_record(account):
         calls.append("records")
-        return status(success=True), []
+        return status(success=True), [record]
 
     class Signer:
         name = "原神"
         en_name = "GenshinImpact"
-        has_record = True
+        game_id = 2
 
         def __init__(self, account, records):
-            pass
+            self.record = records[0]
 
         async def get_info(self, platform):
             calls.append("info")
@@ -231,7 +230,7 @@ def test_game_sign_info_auth_error_stops_only_web_calls(expiry_state, mystool, m
             calls.append("sign")
             return status(success=True), None
 
-    monkeypatch.setattr(plan, "get_game_record", game_record)
+    monkeypatch.setattr(plan, "get_bound_game_roles", game_record)
     monkeypatch.setattr(plan.BaseGameSign, "available_game_signs", [Signer])
     asyncio.run(plan.perform_game_sign(user, ["owner", "shared"], owner_id="owner"))
     assert calls == ["records", "info"]
@@ -289,12 +288,17 @@ def test_app_refresh_resumes_at_next_existing_scheduled_run(mystool, monkeypatch
         calls.append(account.cookies.stoken_v2)
         if account.cookies.stoken_v2 == "v2_app":
             return model.BaseApiStatus(login_expired=True), None
-        return model.BaseApiStatus(success=True), SimpleNamespace(current_myb=10, state_dict={})
+        return model.BaseApiStatus(success=True), model.MissionState(current_myb=10, state_dict={})
 
     async def private_message(user_id, message):
         notices.append((user_id, message))
         return True, None
 
+    async def board_sign(self, user):
+        return model.MissionStatus(success=True), 0
+
+    mission = import_module(f"{package}.api.myb_missions_api")
+    monkeypatch.setattr(mission.BBSMission, "sign", board_sign)
     monkeypatch.setattr(plan, "get_missions_state", missions)
     monkeypatch.setattr(plan, "send_private_msg", private_message)
     monkeypatch.setattr(expiry, "send_private_msg", private_message)
@@ -353,7 +357,7 @@ def test_scheduled_myb_summary_ends_with_estimated_web_token_expiry(
 
     async def missions(_account):
         return status(success=True), SimpleNamespace(
-            current_myb=100, state_dict={plan.BaseMission.SIGN: (SimpleNamespace(threshold=1), 0)},
+            current_myb=100, unconfirmed={}, state_dict={plan.BaseMission.SIGN: (SimpleNamespace(threshold=1), 0)},
         )
 
     async def send_private(user_id, message):
@@ -370,3 +374,207 @@ def test_scheduled_myb_summary_ends_with_estimated_web_token_expiry(
         assert summary[-1] == "🔔网页 Token 预计于 2026年12月28日过期。"
     else:
         assert summary[-1] == "🔔网页 Token 到期日尚未记录，完成一次 Web 扫码后会显示。"
+
+
+
+@pytest.mark.parametrize("action", ["read", "like"])
+def test_mission_actions_stop_on_empty_feed(mystool, monkeypatch, action):
+    api = import_module(f"{mystool.__name__}.api.myb_missions_api")
+    mission = api.BBSMission(make_account(mystool))
+    attempts = []
+
+    async def empty_posts(retry):
+        attempts.append(retry)
+        assert len(attempts) == 1
+        return api.BaseApiStatus(success=True), []
+
+    monkeypatch.setattr(mission, "get_posts", empty_posts)
+    status = asyncio.run(getattr(mission, action)(retry=False))
+    assert status.failed_getting_post and not status
+
+
+def test_bbs_keeps_board_receipts_with_no_account_progress(expiry_state, mystool, monkeypatch):
+    _, account, _, _ = expiry_state
+    plan = import_module(f"{mystool.__name__}.command.plan")
+    model = import_module(f"{mystool.__name__}.model.common")
+    account.mission_games = ["BoardOne", "BoardTwo"]
+    calls, messages = [], []
+
+    async def unavailable(_):
+        return model.BaseApiStatus(network_error=True), None
+
+    class BoardOne:
+        name, gids = "板块一", 1
+
+        def __init__(self, account):
+            pass
+
+        async def sign(self, user):
+            calls.append(self.gids)
+            return model.MissionStatus(success=True), 0
+
+    class BoardTwo(BoardOne):
+        name, gids = "板块二", 2
+
+    async def send(message):
+        messages.append(message)
+
+    monkeypatch.setattr(plan, "get_missions_state", unavailable)
+    monkeypatch.setattr(plan.BaseMission, "available_games", {"BoardOne": BoardOne, "BoardTwo": BoardTwo})
+    user = plan.UserData(accounts={account.bbs_uid: account})
+    asyncio.run(plan.perform_bbs_sign(user, [], matcher=SimpleNamespace(send=send), owner_id="owner"))
+    assert calls == [1, 2]
+    assert "板块一签到：✓" in messages[0] and "板块二签到：✓" in messages[0]
+    assert "已完成今日" not in messages[0] and "当前米游币: 暂未查到" in messages[0]
+
+
+def test_sign_result_survives_empty_award_calendar(expiry_state, mystool, monkeypatch):
+    _, account, _, outgoing = expiry_state
+    plan = import_module(f"{mystool.__name__}.command.plan")
+    model = import_module(f"{mystool.__name__}.model.common")
+    user = plan.UserData(accounts={account.bbs_uid: account})
+    role = model.GameRecord(region_name="测试区", game_id=2, level=20, region="cn_gf01",
+                            game_role_id="321", nickname="旅行者")
+
+    async def roles(_):
+        return model.BaseApiStatus(success=True), [role]
+
+    async def send(user_id, message):
+        outgoing.append((user_id, str(message)))
+
+    class Signer:
+        name, en_name, game_id = "原神", "GenshinImpact", 2
+
+        def __init__(self, account, records):
+            self.record = records[0]
+
+        async def get_info(self, platform):
+            return model.BaseApiStatus(success=True), model.GameSignInfo(
+                is_sign=True, total_sign_day=0, sign_cnt_missed=0,
+            )
+
+        async def get_rewards(self):
+            return model.BaseApiStatus(success=True), []
+
+    monkeypatch.setattr(plan, "get_bound_game_roles", roles)
+    monkeypatch.setattr(plan, "send_private_msg", send)
+    monkeypatch.setattr(plan.BaseGameSign, "available_game_signs", [Signer])
+    asyncio.run(plan.perform_game_sign(user, ["owner"], owner_id="owner"))
+    assert len(outgoing) == 1
+    assert "已经签到过了" in outgoing[0][1] and "奖励暂未查到" in outgoing[0][1]
+
+
+def test_estimated_web_reminder_retries_definite_failure_and_dedups_app_refresh(expiry_state, monkeypatch):
+    expiry, _, records, _ = expiry_state
+    current = records["accounts"][("owner", "123")]
+    current["web_scanned_at"] = int(datetime(2026, 11, 27, 17, tzinfo=timezone.utc).timestamp())
+    sends = []
+    records["users"]["other"]["enable_notice"] = False
+
+    async def load():
+        return records
+
+    async def send(user_id, message):
+        sends.append((user_id, message))
+        if len(sends) == 1:
+            return False, expiry.PrivateMessageUnavailable("no bot")
+        if user_id == "shared":
+            return False, TimeoutError()
+        return True, None
+
+    monkeypatch.setattr(expiry.Repository, "load", load)
+    monkeypatch.setattr(expiry, "send_private_msg", send)
+
+    async def run():
+        await expiry.send_estimated_web_expiry_reminders(today=date(2026, 12, 24))
+        assert not sends
+        await expiry.send_estimated_web_expiry_reminders(today=date(2026, 12, 25))
+        current["credential_versions"]["app"] = 1
+        await expiry.send_estimated_web_expiry_reminders(today=date(2026, 12, 28))
+        await expiry.send_estimated_web_expiry_reminders(today=date(2026, 12, 29))
+
+    asyncio.run(run())
+    assert [owner for owner, _ in sends] == ["owner", "shared", "owner"]
+    assert all("2026年12月28日" in message for _, message in sends)
+
+
+
+@pytest.mark.parametrize("identified", [False, True])
+def test_daily_note_widget_needs_matching_role_with_multiple_bound_roles(expiry_state, mystool, monkeypatch, identified):
+    _, account, _, _ = expiry_state
+    api = import_module(f"{mystool.__name__}.api.common")
+    plan = import_module(f"{mystool.__name__}.command.plan")
+    first = api.GameRecord(game_id=2, game_role_id="1111", region="cn_gf01",
+                           region_name="天空岛", nickname="旅行者", level=60)
+    second = first.copy(update={"region": "cn_qd01", "game_role_id": "2222"})
+    account.game_sign_roles = {"GenshinImpact": [(second.region, second.game_role_id)]}
+    calls = []
+
+    async def roles(_):
+        return api.BaseApiStatus(success=True), [first, second]
+
+    def respond(request):
+        calls.append(request)
+        if request.url.path.endswith("/dailyNote"):
+            return httpx.Response(200, json={"retcode": 1034, "data": {}})
+        assert request.url.path.endswith("/widget/v2")
+        data = {"current_resin": 200}
+        if identified:
+            data["role"] = {"role_id": second.game_role_id, "server": second.region}
+        return httpx.Response(200, json={"retcode": 0, "data": data})
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: client(transport=httpx.MockTransport(respond)))
+    monkeypatch.setattr(plan, "get_bound_game_roles", roles)
+
+    notes = asyncio.run(plan._account_notes(account, plan.GenshinImpactSign, "owner", None, {}))
+    assert calls[0].url.params["role_id"] == second.game_role_id
+    assert "stoken" not in calls[0].headers["cookie"] and "stoken" in calls[1].headers["cookie"]
+    assert calls[1].headers["x-rpc-device_id"] == "ios"
+    if identified:
+        assert [role.game_role_id for role, _ in notes] == [second.game_role_id]
+    else:
+        assert not notes
+
+
+
+def test_anonymous_post_feed_cannot_expire_account_app_credentials(mystool, monkeypatch):
+    api = import_module(f"{mystool.__name__}.api.myb_missions_api")
+    client = httpx.AsyncClient
+
+    def respond(request):
+        assert "cookie" not in request.headers
+        return httpx.Response(200, json={"retcode": -100, "message": "登录失效", "data": None})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: client(transport=httpx.MockTransport(respond)))
+    mission = api.BBSMission(make_account(mystool))
+    status = asyncio.run(mission.read(retry=False))
+    assert not status and status.failed_getting_post and not status.login_expired
+
+
+
+def test_web_role_lookup_uses_only_web_v2_credentials(mystool, monkeypatch):
+    api = import_module(f"{mystool.__name__}.api.common")
+    account = make_account(mystool)
+    account.cookies.update({
+        "ltoken_v2": "fixture-web-token", "cookie_token_v2": "fixture-cookie",
+        "ltmid_v2": "fixture-mid", "account_mid_v2": "fixture-mid",
+    })
+    client = httpx.AsyncClient
+
+    def respond(request):
+        assert str(request.url) == api.URL_BOUND_GAME_ROLES
+        cookie = request.headers["cookie"]
+        assert "ltoken_v2=fixture-web-token" in cookie and "stoken=" not in cookie
+        return httpx.Response(200, json={"retcode": 0, "data": {"list": [
+            {"game_biz": "hk4e_cn", "game_uid": "1001", "region": "cn_gf01",
+             "region_name": "天空岛", "nickname": "旅行者", "level": 60},
+            {"game_biz": "hk4e_bilibili", "game_uid": "1001", "region": "cn_qd01",
+             "region_name": "世界树", "nickname": "旅行者", "level": 20},
+        ]}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: client(transport=httpx.MockTransport(respond)))
+    status, roles = asyncio.run(api.get_bound_game_roles(account))
+    assert status and [(role.game_id, role.region, role.game_role_id) for role in roles] == [
+        (2, "cn_gf01", "1001"), (2, "cn_qd01", "1001"),
+    ]

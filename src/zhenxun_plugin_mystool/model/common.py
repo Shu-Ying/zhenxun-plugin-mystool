@@ -354,13 +354,15 @@ class MissionData(BaseModel):
     """任务名字，如 讨论区签到"""
     mission_key: str
     """任务代号，如 continuous_sign"""
+    board_scoped: bool = False
     threshold: int
     """任务完成的最多次数"""
 
 
 class MissionState(BaseModel):
-    current_myb: int
+    current_myb: Optional[int]
     """用户当前米游币数量"""
+    unconfirmed: Dict[str, MissionData] = {}
     state_dict: Dict[str, Tuple[MissionData, int]]
     """所有任务对应的完成进度 {mission_key, (MissionData, 当前进度)}"""
 
@@ -369,6 +371,7 @@ class GenshinNote(BaseModel):
     """
     原神实时便笺数据 (从米游社内相关页面API的返回数据初始化)
     """
+    max_resin: Optional[int]
     current_resin: Optional[int]
     """当前树脂数量"""
     finished_task_num: Optional[int]
@@ -603,6 +606,8 @@ class GetFpStatus(BaseApiStatus):
 
 
 class BoardStatus(BaseApiStatus):
+    role: Optional[GameRecord] = None
+
     """
     实时便笺 返回结果
     """

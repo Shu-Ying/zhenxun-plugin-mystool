@@ -1,22 +1,30 @@
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 import time
 
-from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, EVENT_JOB_MISSED
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.jobstores.base import JobLookupError
 from nonebot_plugin_apscheduler import scheduler
+from tortoise.transactions import in_transaction
 from zhenxun.utils.manager.priority_manager import PriorityLifecycle
 
-from ..api.common import get_good_detail, good_exchange_sync
-from ..model.config import plugin_config
+from ..api.common import get_good_detail, good_exchange_sync, role_game_id
+from ..model.data import ExchangePlan, UserAccount
 from ..storage import PluginDataManager, data_session
 from ..storage.codec import plan_key
-from ..utils import COMMAND_BEGIN, get_all_bind, get_last_command_sep, logger, send_private_msg
+from ..storage.models import MystoolAccount, MystoolExchangeExecution, MystoolPlan, MystoolRevision
+from ..storage.repository import Repository
+from ..utils import COMMAND_BEGIN, get_last_command_sep, logger, send_private_msg
 from .credential_expiry import CredentialExpiry
 
+
 _jobs = {}
-_results = {}
-_locks = {}
+SLOT_GRACE_SECONDS = 1
+OUTCOME_TEXT = {"unknown": "兑换结果待核实，请在米游社核对。",
+                "success": "兑换成功", "rejected": "米游社已明确拒绝本次兑换",
+                "missed": "兑换场次已错过"}
 
 
 def plan_pause_reason(plan):
@@ -27,6 +35,22 @@ def plan_pause_reason(plan):
     if plan.scheduled_at <= time.time():
         return "schedule_passed"
     return None
+
+
+def redemption_destination(plan):
+    role = plan.game_record
+    target = (role.game_id, role.region, role.game_role_id) if plan.good.is_virtual and role else None
+    return plan.account.bbs_uid, plan.good.goods_id, target
+
+
+def redemption_key(plan):
+    return hashlib.sha256(json.dumps((redemption_destination(plan), plan.scheduled_at)).encode()).hexdigest()
+
+
+def _valid_exchange_target(plan):
+    return (not plan.good.is_virtual or (
+        plan.game_record is not None and role_game_id(plan.good.game_biz) == plan.game_record.game_id
+    ))
 
 
 async def hydrate_game_biz(plan):
@@ -41,120 +65,151 @@ def schedule_plan(user_id, plan):
         plan.paused_reason = reason
         return False
     user_id = PluginDataManager.plugin_data.user_bind.get(user_id, user_id)
-    key = (user_id, plan_key(plan))
-    _results.setdefault(key, {})
-    for index in range(plugin_config.preference.exchange_thread_count):
-        job_id = f"exchange-plan-{key[1]}-{user_id}-{index}"
-        _jobs[job_id] = (key, index)
-        scheduler.add_job(
-            execute_exchange_job,
-            "date",
-            id=job_id,
-            args=key,
-            replace_existing=True,
-            run_date=datetime.fromtimestamp(plan.scheduled_at, timezone.utc),
-            max_instances=plugin_config.preference.exchange_thread_count,
-        )
+    args = (user_id, plan_key(plan), plan.generation)
+    job_id = f"exchange-plan-{args[1]}-{user_id}-{plan.generation or 'legacy'}"
+    _jobs[job_id] = args
+    scheduler.add_job(
+        execute_exchange_job, "date", id=job_id, args=args, replace_existing=True,
+        run_date=datetime.fromtimestamp(plan.scheduled_at, timezone.utc),
+        misfire_grace_time=SLOT_GRACE_SECONDS,
+    )
     return True
 
 
-@data_session
-async def execute_exchange_job(user_id, identity):
-    user = PluginDataManager.plugin_data.users.get(user_id)
-    plan = (
-        next((item for item in user.exchange_plans if plan_key(item) == identity), None)
-        if user
-        else None
-    )
-    if plan is None or plan.paused_reason or plan.scheduled_at is None:
-        return False, None
-    status, result = await asyncio.to_thread(good_exchange_sync, plan)
-    if status.login_expired:
-        await CredentialExpiry(user_id, plan.account).handle(status, "combined", "商品兑换")
-    return status, result
+def _get_plan(records, owner, identity, generation):
+    payload = records["plans"].get((owner, identity))
+    if payload is None or payload.get("generation") != generation:
+        return None
+    data = records["accounts"].get((owner, payload["bbs_uid"]))
+    if data is not None:
+        return ExchangePlan.parse_obj({**payload, "account": UserAccount.parse_obj(data)})
+    return None
+
+
+async def _claim(owner, identity, generation):
+    # Use the same locks as plan edits and cancellations. A returned claim
+    # has committed, and the key survives plan, account and binding deletion.
+    async with Repository.lock(), in_transaction() as connection:
+        await (MystoolRevision.filter(key="state").using_db(connection)
+               .select_for_update().get())
+        row = await MystoolPlan.filter(user_id=owner, plan_id=identity).using_db(connection).get_or_none()
+        if row is None or row.data.get("generation") != generation:
+            return None, None
+        account_row = await MystoolAccount.filter(user_id=owner, bbs_uid=row.data["bbs_uid"]).using_db(connection).get_or_none()
+        if account_row is None:
+            return None, None
+        plan = ExchangePlan.parse_obj({**row.data, "account": UserAccount.parse_obj(account_row.data)})
+        if plan.paused_reason or plan.scheduled_at is None or not _valid_exchange_target(plan):
+            return None, None
+        now = time.time()
+        if now < plan.scheduled_at:
+            return None, None
+        if now > plan.scheduled_at + SLOT_GRACE_SECONDS:
+            return plan, "missed"
+        key = redemption_key(plan)
+        execution, created = await MystoolExchangeExecution.get_or_create(
+            key=key, using_db=connection, defaults={
+                "owner_id": owner, "plan_id": identity, "generation": generation,
+                "scheduled_at": plan.scheduled_at,
+                "account_label": plan.account.display_name, "goods_name": plan.good.general_name,
+            },
+        )
+    if created:
+        return plan, "claimed"
+    if (execution.owner_id, execution.plan_id, execution.generation) == (owner, identity, generation):
+        return None, None
+    return plan, "duplicate"
+
+
+async def _finish_plan(owner, identity, generation, *, missed=False):
+    def finish(records):
+        plan = _get_plan(records, owner, identity, generation)
+        if plan is None or plan.paused_reason:
+            return None
+        if missed:
+            records["plans"][(owner, identity)]["paused_reason"] = "schedule_passed"
+        else:
+            del records["plans"][(owner, identity)]
+        return plan
+
+    return await Repository.update(finish)
+
+
+async def _notify_result(owner, plan, text):
+    records = await Repository.load()
+    for recipient in [owner, *(source for source, target in records["bindings"].items() if target == owner)]:
+        await send_private_msg(recipient, f"账户 {plan.account.display_name}\n{plan.good.general_name}\n{text}")
+
+
+async def record_missed_slot(owner, identity, generation):
+    plan = await _finish_plan(owner, identity, generation, missed=True)
+    if plan is not None:
+        hint = f"{COMMAND_BEGIN}兑换{get_last_command_sep()}+ {plan.good.goods_id}"
+        await _notify_result(owner, plan, f"兑换场次已错过。请使用『{hint}』确认新场次。")
+
+
+def _send_in_slot(plan):
+    if time.time() > plan.scheduled_at + SLOT_GRACE_SECONDS:
+        return None
+    return good_exchange_sync(plan)
+
+
+async def execute_exchange_job(owner, identity, generation=None):
+    plan, claim = await _claim(owner, identity, generation)
+    if plan is None:
+        return
+    if claim == "missed":
+        await record_missed_slot(owner, identity, generation)
+        return
+    if claim == "duplicate":
+        await _finish_plan(owner, identity, generation)
+        await _notify_result(owner, plan, "该兑换意图已有执行记录，本次未再次提交。")
+        return
+
+    try:
+        receipt = await asyncio.to_thread(_send_in_slot, plan)
+    except Exception:
+        logger.exception("兑换请求结果无法确认")
+        receipt = False, None
+    key = redemption_key(plan)
+    if receipt is None:
+        await MystoolExchangeExecution.filter(key=key).update(outcome="missed")
+        await record_missed_slot(owner, identity, generation)
+        return
+    status, result = receipt
+    if status and result is not None:
+        outcome = "success" if result.result else "rejected"
+    elif getattr(status, "login_expired", False):
+        outcome = "rejected"
+    else:
+        outcome = "unknown"
+    await MystoolExchangeExecution.filter(key=key).update(outcome=outcome)
+    await _finish_plan(owner, identity, generation)
+    if getattr(status, "login_expired", False):
+        await CredentialExpiry(owner, plan.account).handle(status, "combined", "商品兑换")
+    else:
+        await _notify_result(owner, plan, OUTCOME_TEXT[outcome])
 
 
 def cancel_plan(user_id, plan):
     user_id = PluginDataManager.plugin_data.user_bind.get(user_id, user_id)
-    key = (user_id, plan_key(plan))
-    for job_id, (registered, _) in list(_jobs.items()):
-        if registered == key:
+    args = (user_id, plan_key(plan), plan.generation)
+    for job_id, registered in list(_jobs.items()):
+        if registered == args:
             try:
                 scheduler.remove_job(job_id)
             except JobLookupError:
                 pass
             _jobs.pop(job_id, None)
-    _results.pop(key, None)
 
 
 def on_exchange_result(event):
-    if event.job_id in _jobs:
+    args = _jobs.pop(event.job_id, None)
+    if args is not None and event.code == EVENT_JOB_MISSED:
         scheduler.add_job(
-            process_exchange_result,
-            "date",
-            args=(event,),
-            id="mystool-result-" + event.job_id,
-            replace_existing=True,
-            misfire_grace_time=None,
+            record_missed_slot, "date", args=args, id="mystool-result-" + event.job_id,
+            replace_existing=True, misfire_grace_time=None,
         )
-
-
-async def process_exchange_result(event):
-    entry = _jobs.get(event.job_id)
-    if entry is None:
-        return
-    key = (asyncio.get_running_loop(), entry[0])
-    async with _locks.setdefault(key, asyncio.Lock()):
-        await _process_exchange_result(event)
-
-
-@data_session
-async def _process_exchange_result(event):
-    entry = _jobs.get(event.job_id)
-    if entry is None:
-        return
-    key, index = entry
-    user_id, identity = key
-    user = PluginDataManager.plugin_data.users.get(user_id)
-    plan = (
-        next((item for item in user.exchange_plans if plan_key(item) == identity), None)
-        if user
-        else None
-    )
-    if plan is None:
-        _jobs.pop(event.job_id, None)
-        return
-    results = _results.setdefault(key, {})
-    if index in results:
-        return
-    missed = event.code == EVENT_JOB_MISSED
-    status, result = (False, None) if missed or event.exception else event.retval
-    success = bool(status and result and result.result)
-    already_succeeded = any(results.values())
-    outcome = None if missed else success
-    completed = {**results, index: outcome}
-    finished = len(completed) == plugin_config.preference.exchange_thread_count
-    all_missed = finished and all(value is None for value in completed.values())
-    if finished:
-        if all_missed:
-            plan.paused_reason = "schedule_passed"
-        else:
-            user.exchange_plans.remove(plan)
-        await PluginDataManager.save()
-        _results.pop(key, None)
-    else:
-        results[index] = outcome
-    _jobs.pop(event.job_id, None)
-    if all_missed:
-        hint = f"{COMMAND_BEGIN}兑换{get_last_command_sep()}+ {plan.good.goods_id}"
-        text = f"兑换场次已错过。请使用『{hint}』确认新场次。"
-    elif missed or already_succeeded or getattr(status, "login_expired", False):
-        return
-    else:
-        result_text = "兑换成功" if success else "兑换失败" if status else "兑换请求发送失败"
-        text = f"线程 {index + 1}\n{result_text}"
-    for recipient in [user_id, *get_all_bind(user_id)]:
-        await send_private_msg(recipient, f"账户 {plan.account.display_name}\n{plan.good.general_name}\n{text}")
 
 
 @PriorityLifecycle.on_startup(priority=3)
@@ -164,11 +219,19 @@ async def restore_exchange_jobs():
     for user_id, user in PluginDataManager.plugin_data.users.items():
         if user_id in PluginDataManager.plugin_data.user_bind:
             continue
-        for plan in user.exchange_plans:
+        for plan in list(user.exchange_plans):
+            if plan.scheduled_at is not None and await MystoolExchangeExecution.filter(
+                key=redemption_key(plan),
+            ).exclude(outcome="missed").exists():
+                user.exchange_plans.remove(plan)
+                continue
             if reason := plan_pause_reason(plan):
                 plan.paused_reason = reason
                 continue
             await hydrate_game_biz(plan)
+            if not _valid_exchange_target(plan):
+                plan.paused_reason = "target_unconfirmed"
+                continue
             schedules.append((user_id, plan))
     await PluginDataManager.save()
     for user_id, plan in schedules:

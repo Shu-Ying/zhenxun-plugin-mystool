@@ -7,7 +7,6 @@ PREFERENCE_KEYS = {
     "max_retry_times": "请求重试次数",
     "retry_interval": "请求重试间隔秒",
     "timezone": "兑换时区",
-    "exchange_thread_count": "兑换线程数",
     "log_head": "日志前缀",
     "encoding": "文件编码",
     "max_user": "最大用户数",
