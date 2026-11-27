@@ -110,7 +110,7 @@ class BaseGameSign:
                     headers["DS"] = generate_ds() if platform == "ios" else generate_ds(platform="android")
                     async with httpx.AsyncClient() as client:
                         res = await client.get(self.url_info, headers=headers,
-                                               cookies=self.account.cookies.dict(),
+                                               cookies=self.account.cookies.request_cookies("web"),
                                                timeout=plugin_config.preference.timeout)
                     api_result = ApiResultHandler(res.json())
                     if api_result.login_expired:
@@ -137,7 +137,7 @@ class BaseGameSign:
                    platform: Literal["ios", "android"] = "ios",
                    mmt_data: MmtData = None,
                    geetest_result: GeetestResult = None,
-                   retry: bool = True) -> Tuple[BaseApiStatus, Optional[MmtData]]:
+                   retry: bool = True, *, prepare_device=None) -> Tuple[BaseApiStatus, Optional[MmtData]]:
         """
         签到
 
@@ -160,8 +160,11 @@ class BaseGameSign:
             headers["Sec-Fetch-Site"] = "same-site"
             headers["DS"] = generate_ds()
         else:
-            await device_login(self.account)
-            await device_save(self.account)
+            if prepare_device is None:
+                await device_login(self.account)
+                await device_save(self.account)
+            elif await prepare_device() is False:
+                return BaseApiStatus(), None
             headers["x-rpc-device_id"] = self.account.device_id_android
             headers["x-rpc-device_model"] = plugin_env.device_config.X_RPC_DEVICE_MODEL_ANDROID
             headers["User-Agent"] = plugin_env.device_config.USER_AGENT_ANDROID
@@ -185,7 +188,7 @@ class BaseGameSign:
                         res = await client.post(
                             self.url_sign,
                             headers=headers,
-                            cookies=self.account.cookies.dict(),
+                            cookies=self.account.cookies.request_cookies("web"),
                             timeout=plugin_config.preference.timeout,
                             json=content
                         )

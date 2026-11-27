@@ -3,14 +3,21 @@ import json
 
 
 def plan_key(plan):
-    identity = [
-        plan.good.goods_id,
-        plan.good.time,
-        plan.address.id if plan.address else None,
-        plan.account.bbs_uid,
-        plan.game_record.game_role_id if plan.game_record else None,
-    ]
-    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+    return plan.legacy_plan_id or hashlib.sha256(
+        json.dumps(plan.identity, ensure_ascii=False).encode()
+    ).hexdigest()
+
+
+def _restore_legacy_slot(plan, stored_id):
+    next_time = plan.good.next_time
+    if not next_time or next_time < 0:
+        return
+    sale_start = plan.good.sale_start_time
+    # With an earlier opening, old saves could switch the hash to next_time
+    # after that opening passed. Only the earlier slot's hash proves the slot.
+    slot = sale_start if sale_start and 0 < sale_start < next_time else next_time
+    if plan_key(plan.copy(update={"scheduled_at": slot})) == stored_id:
+        plan.scheduled_at = slot
 
 
 def encode(data):
@@ -29,7 +36,7 @@ def encode(data):
         for uid, account in user.accounts.items():
             records["accounts"][(user_id, uid)] = json.loads(account.json())
         for plan in user.exchange_plans:
-            payload = json.loads(plan.json(exclude={"account"}))
+            payload = json.loads(plan.json(exclude={"account", "legacy_plan_id"}))
             payload["bbs_uid"] = plan.account.bbs_uid
             records["plans"][(user_id, plan_key(plan))] = payload
     validate(records)
@@ -55,11 +62,18 @@ def decode(records):
     users = {uid: UserData.parse_obj(value) for uid, value in records["users"].items()}
     for (uid, bbs_uid), value in records["accounts"].items():
         users[uid].accounts[bbs_uid] = UserAccount.parse_obj(value)
-    for (uid, _), value in records["plans"].items():
+    for (uid, stored_id), value in records["plans"].items():
         payload = dict(value)
         account = users[uid].accounts[payload.pop("bbs_uid")]
+        legacy = "scheduled_at" not in payload
+        payload.setdefault("scheduled_at", None)
         plan = ExchangePlan.parse_obj({**payload, "account": account})
         plan.account = account
+        if legacy:
+            _restore_legacy_slot(plan, stored_id)
+        if plan.scheduled_at is None:
+            plan.legacy_plan_id = stored_id
+            plan.paused_reason = "schedule_unconfirmed"
         users[uid].exchange_plans.add(plan)
     data = PluginData(users=users, user_bind=records["bindings"])
     data.do_user_bind()

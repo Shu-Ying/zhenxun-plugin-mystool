@@ -131,7 +131,7 @@ class BaseMission:
                             headers=headers,
                             json=content,
                             timeout=plugin_config.preference.timeout,
-                            cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                            cookies=self.account.cookies.request_cookies("app")
                         )
                     api_result = ApiResultHandler(res.json())
                     if api_result.login_expired:
@@ -150,13 +150,18 @@ class BaseMission:
                         logger.debug(f"网络请求返回: {res.text}")
                         if plugin_config.preference.geetest_url or user.geetest_url:
                             create_status, mmt_data = await create_verification(self.account)
+                            if create_status.login_expired:
+                                return MissionStatus(login_expired=True), None
                             logger.debug(
                                 "米游币任务 - 讨论区签到: "
                                 f"用户 {self.account.display_name} 创建了人机验证任务，mmt_data: {mmt_data}"
                             )
                             if create_status:
                                 if geetest_result := await get_validate(user, mmt_data.gt, mmt_data.challenge):
-                                    if await verify_verification(mmt_data, geetest_result, self.account):
+                                    verify_status = await verify_verification(mmt_data, geetest_result, self.account)
+                                    if verify_status.login_expired:
+                                        return MissionStatus(login_expired=True), None
+                                    if verify_status:
                                         logger.success(
                                             f"米游币任务 - 讨论区签到: 用户 {self.account.display_name} 人机验证通过")
                                         continue
@@ -241,7 +246,7 @@ class BaseMission:
                                     URL_READ.format(post_id),
                                     headers=self.headers,
                                     timeout=plugin_config.preference.timeout,
-                                    cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                                    cookies=self.account.cookies.request_cookies("app")
                                 )
                             api_result = ApiResultHandler(res.json())
                             if api_result.login_expired:
@@ -302,7 +307,7 @@ class BaseMission:
                                     URL_LIKE, headers=headers,
                                     json={'is_cancel': False, 'post_id': post_id},
                                     timeout=plugin_config.preference.timeout,
-                                    cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                                    cookies=self.account.cookies.request_cookies("app")
                                 )
                             api_result = ApiResultHandler(res.json())
                             if api_result.login_expired:
@@ -356,7 +361,7 @@ class BaseMission:
                             URL_SHARE.format(posts[0]),
                             headers=headers,
                             timeout=plugin_config.preference.timeout,
-                            cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                            cookies=self.account.cookies.request_cookies("app")
                         )
                     api_result = ApiResultHandler(res.json())
                     if api_result.login_expired:
@@ -471,7 +476,7 @@ async def get_missions(account: UserAccount, retry: bool = True) -> Tuple[BaseAp
             with attempt:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(URL_MISSION, headers=HEADERS_MISSION,
-                                           cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                           cookies=account.cookies.request_cookies("app"),
                                            timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 if api_result.login_expired:
@@ -508,7 +513,7 @@ async def get_missions_state(account: UserAccount, retry: bool = True) -> Tuple[
             with attempt:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(URL_MISSION_STATE, headers=HEADERS_MISSION,
-                                           cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                           cookies=account.cookies.request_cookies("app"),
                                            timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 if api_result.login_expired:

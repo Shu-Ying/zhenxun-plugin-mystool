@@ -19,12 +19,14 @@ from nonebot.matcher import Matcher
 from nonebot.params import ArgPlainText, T_State, CommandArg, Command
 from nonebot_plugin_apscheduler import scheduler
 
-from ..api.common import get_game_record, get_good_detail, get_good_list, good_exchange_sync, \
+from ..api.common import get_game_record, get_good_list, good_exchange_sync, \
     get_device_fp, \
     good_exchange
 from ..command.common import CommandRegistry
 from ..model import Good, GameRecord, ExchangeStatus, PluginDataManager, plugin_config, UserAccount, \
     ExchangePlan, ExchangeResult, CommandUsage
+from ..model.common import format_exchange_time
+from ..storage.codec import plan_key
 from ..utils import COMMAND_BEGIN, logger, get_last_command_sep, GeneralMessageEvent, \
     send_private_msg, get_unique_users, \
     get_all_bind, game_list_to_image
@@ -116,14 +118,17 @@ async def _(
     else:
         msg = ""
         for plan in user.exchange_plans:
-            good_detail_status, good = await get_good_detail(plan.good)
-            if not good_detail_status:
-                await matcher.finish("⚠️获取商品详情失败，请稍后再试")
+            good = plan.good
+            slot = format_exchange_time(plan.scheduled_at) if plan.scheduled_at is not None else "待确认"
             msg += f"-- 商品：{good.general_name}" \
                    f"\n- 🔢商品ID：{good.goods_id}" \
                    f"\n- 💰商品价格：{good.price} 米游币" \
-                   f"\n- 📅兑换时间：{good.time_text}" \
+                   f"\n- 📅兑换时间：{slot}" \
                    f"\n- 🆔账户：{plan.account.display_name}"
+            if reason := plan_pause_reason(plan):
+                explanation = "原兑换时间无法确认，计划已暂停" if reason == "schedule_unconfirmed" else "原兑换场次已过"
+                command_hint = f"{COMMAND_BEGIN}兑换{get_last_command_sep()}+ {good.goods_id}"
+                msg += f"\n- {explanation}。请使用『{command_hint}』确认新场次。"
             msg += "\n\n"
         if not msg:
             msg = '您还没有兑换计划哦~\n\n'
@@ -163,7 +168,9 @@ async def _(
     """
     处理三级命令，即商品ID
     """
-    account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts[state['bbs_uid']]
+    data = PluginDataManager.plugin_data
+    user_id = event.get_user_id()
+    account = data.users[user_id].accounts[state['bbs_uid']]
     command_2 = state['command_2']
     if command_2 == '+':
         good_dict = {
@@ -190,26 +197,26 @@ async def _(
         if flag:
             await matcher.finish('⚠️您发送的商品ID不在可兑换的商品列表内，程序已退出')
         state['good'] = good
-        if good.time:
+        scheduled_at = good.time
+        if scheduled_at and scheduled_at > time.time():
+            state['scheduled_at'] = scheduled_at
             # 若为实物商品，也进入下一步骤，但是传入uid为None
             if good.is_virtual:
                 game_records_status, records = await get_game_record(account)
                 if game_records_status:
-                    if len(records) == 0:
-                        state['game_uid'] = records[0].game_role_id
-                    else:
-                        msg = f'您米游社账户下的游戏账号：'
-                        for record in records:
-                            msg += f'\n🎮 {record.region_name} - {record.nickname} - UID {record.game_role_id}'
-                        if records:
-                            state['records'] = records
-                            await matcher.send(
-                                "您兑换的是虚拟物品，请发送想要接收奖励的游戏账号UID：\n🚪发送“退出”即可退出")
-                            await asyncio.sleep(0.5)
-                            await matcher.send(msg)
-                        else:
-                            await matcher.finish(
-                                f"您的米游社账户下还没有绑定游戏账号哦，暂时不能进行兑换，请先前往米游社绑定后重试")
+                    if not records:
+                        await matcher.finish(
+                            "您的米游社账户下还没有绑定游戏账号，请先前往米游社绑定后重试")
+                    msg = '您米游社账户下的游戏账号：'
+                    for record in records:
+                        msg += f'\n🎮 {record.region_name} - {record.nickname} - UID {record.game_role_id}'
+                    state['records'] = records
+                    await matcher.send(
+                        "您兑换的是虚拟物品，请发送想要接收奖励的游戏账号UID：\n🚪发送“退出”即可退出")
+                    await asyncio.sleep(0.5)
+                    await matcher.send(msg)
+                elif getattr(game_records_status, "login_expired", False):
+                    await matcher.finish(f'⚠️米游社登录失效，请使用『{COMMAND_BEGIN}登录』重新登录后再添加计划')
                 else:
                     await matcher.finish('⚠️获取游戏账号列表失败，无法继续')
             else:
@@ -220,22 +227,41 @@ async def _(
             await matcher.finish(f'⚠️该商品暂时不可以兑换，请重新设置')
 
     elif command_2 == '-':
-        plans = PluginDataManager.plugin_data.users[event.get_user_id()].exchange_plans
-        if plans:
-            for plan in plans:
-                if plan.good.goods_id == good_id:
-                    plans.discard(plan)
-                    await PluginDataManager.save()
-                    cancel_plan(event.get_user_id(), plan)
-                    await matcher.finish('兑换计划删除成功')
-            await matcher.finish(f"您没有设置商品ID为 {good_id} 的兑换哦~")
-        else:
-            await matcher.finish("您还没有配置兑换计划哦~")
+        user = data.users[user_id]
+        plans = [
+            plan for plan in user.exchange_plans
+            if plan.good.goods_id == good_id and plan.account.bbs_uid == account.bbs_uid
+        ]
+        if not plans:
+            await matcher.finish(f"该账号没有为商品 {good_id} 设置兑换计划")
+        if len(plans) == 1:
+            await remove_exchange_plan(user_id, user, plans[0], matcher)
+        options = {}
+        lines = []
+        for index, plan in enumerate(sorted(plans, key=lambda item: (item.scheduled_at or 0, plan_key(item))), 1):
+            options[str(index)] = plan_key(plan)
+            slot = format_exchange_time(plan.scheduled_at) if plan.scheduled_at is not None else "待确认"
+            target = "实物"
+            if plan.game_record:
+                target = f"游戏 UID {plan.game_record.game_role_id}"
+            elif plan.address:
+                target = f"收货地址 {plan.address.id}"
+            lines.append(f"{index}. {slot} · {target}")
+        state["delete_plan_options"] = options
+        state["delete_plan_owner"] = data.user_bind.get(user_id, user_id)
+        await matcher.send("该账号下有多个计划，请发送要删除的计划序号，或发送“退出”。\n" + "\n".join(lines))
 
     else:
         await matcher.reject(
             f"⚠️您的输入有误，请重新输入\n\n{myb_exchange_plan_usage.usage.format(HEAD=COMMAND_BEGIN, SEP=get_last_command_sep())}"
         )
+
+
+async def remove_exchange_plan(user_id, user, plan, matcher):
+    user.exchange_plans.remove(plan)
+    await PluginDataManager.save()
+    cancel_plan(user_id, plan)
+    await matcher.finish('兑换计划删除成功')
 
 
 @myb_exchange_plan.got('game_uid')
@@ -249,9 +275,27 @@ async def _(
     """
     初始化商品兑换任务，如果传入UID为None则为实物商品，仍可继续
     """
-    user = PluginDataManager.plugin_data.users[event.get_user_id()]
-    account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts[state['bbs_uid']]
+    data = PluginDataManager.plugin_data
+    user_id = event.get_user_id()
+    if state.get('command_2') == '-':
+        if game_uid == '退出':
+            await matcher.finish('🚪已成功退出')
+        owner_id = data.user_bind.get(user_id, user_id)
+        user = data.users.get(user_id)
+        if owner_id != state['delete_plan_owner'] or user is None:
+            await matcher.finish('账号绑定已变化，请重新发起删除')
+        identity = state['delete_plan_options'].get(game_uid)
+        if identity is None:
+            await matcher.reject('⚠️请选择要删除的计划序号')
+        plan = next((item for item in user.exchange_plans if plan_key(item) == identity), None)
+        if plan is None:
+            await matcher.finish('该计划已不存在，请重新查看兑换计划')
+        await remove_exchange_plan(user_id, user, plan, matcher)
+        return
+    user = data.users[user_id]
+    account = user.accounts[state['bbs_uid']]
     good: Good = state['good']
+    record = None
     if good.is_virtual:
         records: List[GameRecord] = state['records']
         if game_uid == '退出':
@@ -260,27 +304,38 @@ async def _(
         record = next(record_filter, None)
         if not record:
             await matcher.reject('⚠️您输入的UID不在上述账号内，请重新输入')
-        plan = ExchangePlan(good=good, address=account.address, game_record=record, account=account)
-    else:
-        plan = ExchangePlan(good=good, address=account.address, account=account)
+    plan = ExchangePlan(
+        good=good, address=account.address, game_record=record, account=account,
+        scheduled_at=state['scheduled_at'],
+    )
     plan.account = account
+    if plan_pause_reason(plan):
+        await matcher.finish('⚠️所选兑换场次已过，请重新选择场次')
     if plan in user.exchange_plans:
         await matcher.finish('⚠️您已经配置过该商品的兑换哦！')
-    else:
-        user.exchange_plans.add(plan)
-        if not plan.account.device_fp:
-            logger.info(f"账号 {plan.account.display_name} 未设置 device_fp，正在获取...")
-            fp_status, plan.account.device_fp = await get_device_fp(plan.account.device_id_ios)
-            if not fp_status:
-                await matcher.send(
-                    '⚠️从服务器获取device_fp失败！兑换时将在本地生成device_fp。你也可以尝试重新添加兑换计划。')
-        await PluginDataManager.save()
+    await hydrate_game_biz(plan)
+    if not plan.account.device_fp:
+        logger.info(f"账号 {plan.account.display_name} 未设置 device_fp，正在获取...")
+        fp_status, plan.account.device_fp = await get_device_fp(plan.account.device_id_ios)
+        if not fp_status:
+            await matcher.send(
+                '⚠️从服务器获取device_fp失败！兑换时将在本地生成device_fp。你也可以尝试重新添加兑换计划。')
+    if plan_pause_reason(plan):
+        await matcher.finish('⚠️所选兑换场次已过，请重新选择场次')
+    replaced = {
+        item for item in user.exchange_plans
+        if item.paused_reason and item.redemption_target == plan.redemption_target
+    }
+    user.exchange_plans.difference_update(replaced)
+    user.exchange_plans.add(plan)
+    await PluginDataManager.save()
 
-    # 初始化兑换任务
-    schedule_plan(event.get_user_id(), plan)
+    if not schedule_plan(event.get_user_id(), plan):
+        await PluginDataManager.save()
+        await matcher.finish('⚠️所选兑换场次已过，已保留原计划。请重新选择场次')
 
     await matcher.finish(
-        f'🎉设置兑换计划成功！将于 {plan.good.time_text} 开始兑换，到时将会私聊告知您兑换结果')
+        f'🎉设置兑换计划成功！将于 {format_exchange_time(plan.scheduled_at)} 开始兑换，到时将会私聊告知您兑换结果')
 
 
 get_good_image = on_command(plugin_config.preference.command_start + '商品', priority=5, block=True)
@@ -352,7 +407,7 @@ async def _(event: Union[GeneralMessageEvent], arg=ArgPlainText("content")):
             f'{arg[1]} 分区暂时没有可兑换的限时商品。如果这与实际不符，你可以尝试用『{COMMAND_BEGIN}商品 更新』进行更新。')
 
 
-from ..services.exchange_jobs import schedule_plan, cancel_plan
+from ..services.exchange_jobs import cancel_plan, hydrate_game_biz, plan_pause_reason, schedule_plan
 
 
 def image_process(game: str, _lock: Lock = None):

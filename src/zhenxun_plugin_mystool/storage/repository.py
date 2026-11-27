@@ -115,6 +115,23 @@ class Repository:
 
     @classmethod
     async def commit(cls, base, pending):
+        merged, _ = await cls._write(lambda latest: (cls.merge(base, pending, latest), None))
+        return merged
+
+    @classmethod
+    async def update(cls, mutate):
+        """Verify and update the current records inside the repository transaction."""
+        def update_records(latest):
+            records = deepcopy(latest)
+            result = mutate(records)
+            validate(records)
+            return records, result
+
+        _, result = await cls._write(update_records)
+        return result
+
+    @classmethod
+    async def _write(cls, update_records):
         async with cls.lock():
             async with in_transaction() as connection:
                 revision = (
@@ -124,7 +141,9 @@ class Repository:
                     .get()
                 )
                 latest = await cls.read(connection)
-                merged = cls.merge(base, pending, latest)
+                merged, result = update_records(latest)
+                if merged == latest:
+                    return merged, result
                 changed = (
                     await MystoolRevision.filter(
                         key="state", revision=revision.revision
@@ -135,7 +154,7 @@ class Repository:
                 if changed != 1:
                     raise ConcurrentUpdateError("数据库事务版本冲突，请重试")
                 await cls.apply(latest, merged, connection)
-        return merged
+        return merged, result
 
     @classmethod
     async def initialize(cls):

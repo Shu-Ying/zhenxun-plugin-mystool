@@ -150,3 +150,8 @@ data/
 # <<< Comet managed project state <<<
 
 tests/*
+!tests/conftest.py
+!tests/test_login.py
+!tests/test_passport.py
+!tests/test_credential_expiry.py
+!tests/test_exchange_schedule.py

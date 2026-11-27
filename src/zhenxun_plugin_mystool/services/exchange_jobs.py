@@ -1,8 +1,8 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 
-from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.jobstores.base import JobLookupError
 from nonebot_plugin_apscheduler import scheduler
 from zhenxun.utils.manager.priority_manager import PriorityLifecycle
@@ -11,14 +11,35 @@ from ..api.common import get_good_detail, good_exchange_sync
 from ..model.config import plugin_config
 from ..storage import PluginDataManager, data_session
 from ..storage.codec import plan_key
-from ..utils import get_all_bind, logger, send_private_msg
+from ..utils import COMMAND_BEGIN, get_all_bind, get_last_command_sep, logger, send_private_msg
+from .credential_expiry import CredentialExpiry
 
 _jobs = {}
 _results = {}
 _locks = {}
 
 
+def plan_pause_reason(plan):
+    if plan.paused_reason:
+        return plan.paused_reason
+    if plan.scheduled_at is None:
+        return "schedule_unconfirmed"
+    if plan.scheduled_at <= time.time():
+        return "schedule_passed"
+    return None
+
+
+async def hydrate_game_biz(plan):
+    if plan.game_record is not None and not plan.good.game_biz:
+        status, good = await get_good_detail(plan.good.goods_id)
+        if status and good is not None:
+            plan.good.game_biz = good.game_biz
+
+
 def schedule_plan(user_id, plan):
+    if reason := plan_pause_reason(plan):
+        plan.paused_reason = reason
+        return False
     user_id = PluginDataManager.plugin_data.user_bind.get(user_id, user_id)
     key = (user_id, plan_key(plan))
     _results.setdefault(key, {})
@@ -31,9 +52,10 @@ def schedule_plan(user_id, plan):
             id=job_id,
             args=key,
             replace_existing=True,
-            run_date=datetime.fromtimestamp(plan.good.time),
+            run_date=datetime.fromtimestamp(plan.scheduled_at, timezone.utc),
             max_instances=plugin_config.preference.exchange_thread_count,
         )
+    return True
 
 
 @data_session
@@ -44,9 +66,12 @@ async def execute_exchange_job(user_id, identity):
         if user
         else None
     )
-    if plan is None:
+    if plan is None or plan.paused_reason or plan.scheduled_at is None:
         return False, None
-    return await asyncio.to_thread(good_exchange_sync, plan)
+    status, result = await asyncio.to_thread(good_exchange_sync, plan)
+    if status.login_expired:
+        await CredentialExpiry(user_id, plan.account).handle(status, "combined", "商品兑换")
+    return status, result
 
 
 def cancel_plan(user_id, plan):
@@ -70,6 +95,7 @@ def on_exchange_result(event):
             args=(event,),
             id="mystool-result-" + event.job_id,
             replace_existing=True,
+            misfire_grace_time=None,
         )
 
 
@@ -101,24 +127,34 @@ async def _process_exchange_result(event):
     results = _results.setdefault(key, {})
     if index in results:
         return
-    status, result = event.retval if not event.exception else (False, None)
+    missed = event.code == EVENT_JOB_MISSED
+    status, result = (False, None) if missed or event.exception else event.retval
     success = bool(status and result and result.result)
     already_succeeded = any(results.values())
-    completed = {**results, index: success}
-    if len(completed) == plugin_config.preference.exchange_thread_count:
-        user.exchange_plans.remove(plan)
+    outcome = None if missed else success
+    completed = {**results, index: outcome}
+    finished = len(completed) == plugin_config.preference.exchange_thread_count
+    all_missed = finished and all(value is None for value in completed.values())
+    if finished:
+        if all_missed:
+            plan.paused_reason = "schedule_passed"
+        else:
+            user.exchange_plans.remove(plan)
         await PluginDataManager.save()
-    results[index] = success
-    _jobs.pop(event.job_id, None)
-    if not already_succeeded:
-        text = "兑换成功" if success else "兑换失败" if status else "兑换请求发送失败"
-        for recipient in [user_id, *get_all_bind(user_id)]:
-            await send_private_msg(
-                recipient,
-                f"账户 {plan.account.display_name}\n{plan.good.general_name}\n线程 {index + 1}\n{text}",
-            )
-    if len(completed) == plugin_config.preference.exchange_thread_count:
         _results.pop(key, None)
+    else:
+        results[index] = outcome
+    _jobs.pop(event.job_id, None)
+    if all_missed:
+        hint = f"{COMMAND_BEGIN}兑换{get_last_command_sep()}+ {plan.good.goods_id}"
+        text = f"兑换场次已错过。请使用『{hint}』确认新场次。"
+    elif missed or already_succeeded or getattr(status, "login_expired", False):
+        return
+    else:
+        result_text = "兑换成功" if success else "兑换失败" if status else "兑换请求发送失败"
+        text = f"线程 {index + 1}\n{result_text}"
+    for recipient in [user_id, *get_all_bind(user_id)]:
+        await send_private_msg(recipient, f"账户 {plan.account.display_name}\n{plan.good.general_name}\n{text}")
 
 
 @PriorityLifecycle.on_startup(priority=3)
@@ -128,38 +164,16 @@ async def restore_exchange_jobs():
     for user_id, user in PluginDataManager.plugin_data.users.items():
         if user_id in PluginDataManager.plugin_data.user_bind:
             continue
-        for plan in list(user.exchange_plans):
-            status, good = await get_good_detail(plan.good.goods_id)
-            if not status:
-                if getattr(status, "good_not_existed", False):
-                    user.exchange_plans.remove(plan)
-                else:
-                    logger.warning(
-                        "商品查询失败，保留数据库兑换计划",
-                        session=user_id,
-                        target=plan.good.goods_id,
-                    )
-                    if plan.good.time and plan.good.time >= time.time():
-                        schedules.append((user_id, plan))
+        for plan in user.exchange_plans:
+            if reason := plan_pause_reason(plan):
+                plan.paused_reason = reason
                 continue
-            if good is None:
-                logger.warning(
-                    "商品查询未返回详情，保留兑换计划",
-                    session=user_id,
-                    target=plan.good.goods_id,
-                )
-                continue
-            if not good.time or good.time < time.time():
-                user.exchange_plans.remove(plan)
-            else:
-                user.exchange_plans.remove(plan)
-                plan.good = good
-                user.exchange_plans.add(plan)
-                schedules.append((user_id, plan))
+            await hydrate_game_biz(plan)
+            schedules.append((user_id, plan))
     await PluginDataManager.save()
     for user_id, plan in schedules:
         schedule_plan(user_id, plan)
     logger.info("mystool 兑换任务已从数据库恢复")
 
 
-scheduler.add_listener(on_exchange_result, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+scheduler.add_listener(on_exchange_result, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)

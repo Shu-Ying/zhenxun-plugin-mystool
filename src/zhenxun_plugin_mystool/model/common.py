@@ -70,6 +70,14 @@ class BaseModelWithUpdate(BaseModel):
         return self
 
 
+def format_exchange_time(timestamp: int) -> str:
+    from ..model.config import plugin_config
+
+    zone = plugin_config.preference.timezone
+    timezone = pytz.timezone(zone) if zone else None
+    return datetime.fromtimestamp(timestamp, timezone).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class Good(BaseModelWithUpdate):
     """
     商品数据
@@ -150,13 +158,7 @@ class Good(BaseModelWithUpdate):
         elif self.time == 0:
             return None
         elif self.time_limited:
-            from ..model.config import plugin_config
-            if zone := plugin_config.preference.timezone:
-                tz_info = pytz.timezone(zone)
-                date_time = datetime.fromtimestamp(self.time, tz_info)
-            else:
-                date_time = datetime.fromtimestamp(self.time)
-            return date_time.strftime("%Y-%m-%d %H:%M:%S")
+            return format_exchange_time(self.time)
         else:
             return "任何时间"
 

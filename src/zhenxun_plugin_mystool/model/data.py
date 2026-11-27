@@ -99,6 +99,12 @@ class BBSCookies(BaseModelWithSetter, BaseModelWithUpdate):
     login_ticket: Optional[str]
     ltoken: Optional[str]
     mid: Optional[str]
+    ltoken_v2: Optional[str] = None
+    cookie_token_v2: Optional[str] = None
+    ltuid_v2: Optional[str] = None
+    account_id_v2: Optional[str] = None
+    ltmid_v2: Optional[str] = None
+    account_mid_v2: Optional[str] = None
 
     def __init__(self, **data: Any):
         super().__init__(**data)
@@ -108,10 +114,44 @@ class BBSCookies(BaseModelWithSetter, BaseModelWithUpdate):
 
     def is_correct(self) -> bool:
         """判断是否为正确的Cookies"""
-        if self.bbs_uid and self.stoken and self.cookie_token:
-            return True
-        else:
-            return False
+        return self.has_credentials("app") and self.has_credentials("web")
+
+    def has_credentials(self, family: str) -> bool:
+        if family == "app":
+            return bool(self.bbs_uid and (self.stoken_v2 and self.mid or self.stoken_v1))
+        if family == "web":
+            return bool(
+                self.bbs_uid and (
+                    self.ltoken_v2 and self.cookie_token_v2 and self.ltmid_v2 and self.account_mid_v2
+                    or self.ltoken or self.cookie_token
+                )
+            )
+        if family == "combined":
+            return self.has_credentials("app") or self.has_credentials("web")
+        raise ValueError("未知的凭据类型")
+
+    def request_cookies(self, family: str) -> Dict[str, str]:
+        uid = self.bbs_uid
+        if family == "app":
+            if self.stoken_v2 and self.mid and uid:
+                return {"stuid": uid, "stoken": self.stoken_v2, "mid": self.mid}
+            if self.stoken_v1 and uid:
+                return {"stuid": uid, "stoken": self.stoken_v1}
+            return {}
+        if family == "web":
+            if uid and self.ltoken_v2 and self.cookie_token_v2 and self.ltmid_v2 and self.account_mid_v2:
+                return {
+                    "ltoken_v2": self.ltoken_v2, "cookie_token_v2": self.cookie_token_v2,
+                    "ltuid_v2": self.ltuid_v2 or uid, "account_id_v2": self.account_id_v2 or uid,
+                    "ltmid_v2": self.ltmid_v2, "account_mid_v2": self.account_mid_v2,
+                }
+            legacy = {
+                "ltuid": uid, "account_id": uid, "ltoken": self.ltoken, "cookie_token": self.cookie_token,
+            }
+            return {key: value for key, value in legacy.items() if value}
+        if family == "combined":
+            return self.request_cookies("app") | self.request_cookies("web")
+        raise ValueError("未知的凭据类型")
 
     @property
     def bbs_uid(self):
@@ -119,7 +159,7 @@ class BBSCookies(BaseModelWithSetter, BaseModelWithUpdate):
         获取米游社UID
         """
         uid = None
-        for value in [self.stuid, self.ltuid, self.account_id, self.login_uid]:
+        for value in [self.stuid, self.ltuid, self.account_id, self.login_uid, self.ltuid_v2, self.account_id_v2]:
             if value:
                 uid = value
                 break
@@ -250,6 +290,9 @@ class UserAccount(BaseModelWithSetter):
     '''崩铁便笺体力提醒阈值，0为一直提醒'''
     user_resin_threshold: int = 200
     '''原神便笺树脂提醒阈值，0为一直提醒'''
+    credential_versions: Dict[str, int] = {}
+    expired_credentials: Dict[str, str] = {}
+    credential_expiry_notices: Dict[str, List[str]] = {}
 
     def __init__(self, **data: Any):
         if not data.get("device_id_ios") or not data.get("device_id_android"):
@@ -294,17 +337,38 @@ class ExchangePlan(BaseModel):
     """米游社账号"""
     game_record: Optional[GameRecord]
     """商品对应的游戏的玩家账号"""
+    scheduled_at: Optional[int] = None
+    """创建计划时选定的兑换场次时间戳"""
+    paused_reason: Optional[Literal["schedule_unconfirmed", "schedule_passed"]] = None
+    legacy_plan_id: Optional[str] = None
+    """无法恢复原场次时，沿用数据库中原有的计划 ID"""
+
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+        if "scheduled_at" not in data:
+            self.scheduled_at = self.good.time
+
+    @property
+    def redemption_target(self):
+        return (
+            self.good.goods_id,
+            self.address.id if self.address else None,
+            self.account.bbs_uid,
+            self.game_record.game_role_id if self.game_record else None,
+        )
+
+    @property
+    def identity(self):
+        goods_id, address_id, account_id, role_id = self.redemption_target
+        return goods_id, self.legacy_plan_id or self.scheduled_at, address_id, account_id, role_id
 
     def __hash__(self):
-        return hash(
-            (
-                self.good.goods_id,
-                self.good.time,
-                self.address.id if self.address else None,
-                self.account.bbs_uid,
-                self.game_record.game_role_id if self.game_record else None
-            )
-        )
+        return hash(self.identity)
+
+    def __eq__(self, other):
+        if not isinstance(other, ExchangePlan):
+            return NotImplemented
+        return self.identity == other.identity
 
     class CustomDict(dict):
         _hash: int

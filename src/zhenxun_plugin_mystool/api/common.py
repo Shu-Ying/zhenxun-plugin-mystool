@@ -336,6 +336,24 @@ IncorrectReturn = (KeyError, TypeError, AttributeError, IndexError, ValidationEr
 """米游社API返回数据无效会触发的异常组合"""
 
 
+class _InvalidCredentialResponse(Exception):
+    """米游社拒绝签发凭据。"""
+
+
+def _log_invalid_credential_response(action: str, response: Optional[httpx.Response]) -> None:
+    status = response.status_code if response is not None else None
+    retcode = None
+    if response is not None:
+        try:
+            body = response.json()
+        except ValueError:
+            pass
+        else:
+            if isinstance(body, dict) and type(body.get("retcode")) is int:
+                retcode = body["retcode"]
+    logger.warning(f"{action} - 服务器没有正确返回（HTTP {status}，retcode {retcode}）")
+
+
 def is_incorrect_return(exception: Exception, *addition_exceptions: Type[Exception]) -> bool:
     """
     判断是否是米游社API返回数据无效的异常
@@ -426,7 +444,7 @@ async def get_game_record(account: UserAccount, retry: bool = True) -> Tuple[Bas
             with attempt:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(URL_GAME_RECORD.format(account.bbs_uid), headers=HEADERS_GAME_RECORD,
-                                           cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                           cookies=account.cookies.request_cookies("combined"),
                                            timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 if api_result.login_expired:
@@ -484,7 +502,7 @@ async def get_user_myb(account: UserAccount, retry: bool = True) -> Tuple[BaseAp
             with attempt:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(URL_MYB, headers=HEADERS_MYB,
-                                           cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                           cookies=account.cookies.request_cookies("app"),
                                            timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 if api_result.login_expired:
@@ -526,7 +544,7 @@ async def device_login(account: UserAccount, retry: bool = True):
                 headers["DS"] = generate_ds(data)
                 async with httpx.AsyncClient() as client:
                     res = await client.post(URL_DEVICE_LOGIN, headers=headers, json=data,
-                                            cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                            cookies=account.cookies.request_cookies("app"),
                                             timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 if api_result.login_expired:
@@ -571,7 +589,7 @@ async def device_save(account: UserAccount, retry: bool = True):
                 headers["DS"] = generate_ds(data)
                 async with httpx.AsyncClient() as client:
                     res = await client.post(URL_DEVICE_SAVE, headers=headers, json=data,
-                                            cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                            cookies=account.cookies.request_cookies("app"),
                                             timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 if api_result.login_expired:
@@ -708,7 +726,7 @@ async def get_address(account: UserAccount, retry: bool = True) -> Tuple[BaseApi
                 async with httpx.AsyncClient() as client:
                     res = await client.get(URL_ADDRESS.format(
                         round(time.time() * 1000)), headers=headers,
-                        cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                        cookies=account.cookies.request_cookies("combined"),
                         timeout=plugin_config.preference.timeout)
                     api_result = ApiResultHandler(res.json())
                     if api_result.login_expired:
@@ -966,6 +984,7 @@ async def get_login_ticket_by_captcha(phone_number: str,
                                  timeout=plugin_config.preference.timeout
                                  )
 
+    res = None
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
@@ -989,14 +1008,13 @@ async def get_login_ticket_by_captcha(phone_number: str,
                         "通过短信验证码获取 login_ticket - 验证码错误，但你可以再次尝试登录")
                     return GetCookieStatus(incorrect_captcha=True), None
                 else:
-                    raise IncorrectReturn
+                    raise _InvalidCredentialResponse()
     except tenacity.RetryError as e:
-        if is_incorrect_return(e):
-            logger.exception(f"通过短信验证码获取 login_ticket: 服务器没有正确返回")
-            logger.debug(f"网络请求返回: {res.text}")
+        if is_incorrect_return(e, _InvalidCredentialResponse):
+            _log_invalid_credential_response("通过短信验证码获取 login_ticket", res)
             return GetCookieStatus(incorrect_return=True), None
         else:
-            logger.exception(f"通过短信验证码获取 login_ticket: 网络请求失败")
+            logger.warning("通过短信验证码获取 login_ticket - 网络请求失败")
             return GetCookieStatus(network_error=True), None
 
 
@@ -1165,6 +1183,7 @@ async def get_cookie_token_by_stoken(cookies: BBSCookies, device_id: str = None,
     headers["x-rpc-device_id"] = device_id if device_id else generate_device_id()
     if not cookies.stoken_v2:
         return GetCookieStatus(missing_stoken_v2=True), None
+    res = None
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
@@ -1185,15 +1204,14 @@ async def get_cookie_token_by_stoken(cookies: BBSCookies, device_id: str = None,
                     logger.warning("通过 stoken 获取 cookie_token: 登录失效")
                     return GetCookieStatus(login_expired=True), None
                 else:
-                    raise IncorrectReturn
+                    raise _InvalidCredentialResponse()
 
     except tenacity.RetryError as e:
-        if is_incorrect_return(e):
-            logger.exception("通过 stoken 获取 cookie_token: 服务器没有正确返回")
-            logger.debug(f"网络请求返回: {res.text}")
+        if is_incorrect_return(e, _InvalidCredentialResponse):
+            _log_invalid_credential_response("通过 stoken 获取 cookie_token", res)
             return GetCookieStatus(incorrect_return=True), None
         else:
-            logger.exception("通过 stoken 获取 cookie_token: 网络请求失败")
+            logger.warning("通过 stoken 获取 cookie_token - 网络请求失败")
             return GetCookieStatus(network_error=True), None
 
 
@@ -1219,6 +1237,7 @@ async def get_stoken_v2_by_v1(cookies: BBSCookies, device_id: str = None, retry:
 
     if not cookies.stoken_v1:
         return GetCookieStatus(missing_stoken_v1=True), None
+    res = None
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
@@ -1241,15 +1260,14 @@ async def get_stoken_v2_by_v1(cookies: BBSCookies, device_id: str = None, retry:
                     logger.warning(f"通过 stoken_v1 获取 stoken_v2: 登录失效")
                     return GetCookieStatus(login_expired=True), None
                 else:
-                    raise IncorrectReturn
+                    raise _InvalidCredentialResponse()
 
     except tenacity.RetryError as e:
-        if is_incorrect_return(e):
-            logger.exception("通过 stoken_v1 获取 stoken_v2: 服务器没有正确返回")
-            logger.debug(f"网络请求返回: {res.text}")
+        if is_incorrect_return(e, _InvalidCredentialResponse):
+            _log_invalid_credential_response("通过 stoken_v1 获取 stoken_v2", res)
             return GetCookieStatus(incorrect_return=True), None
         else:
-            logger.exception("通过 stoken_v1 获取 stoken_v2: 网络请求失败")
+            logger.warning("通过 stoken_v1 获取 stoken_v2 - 网络请求失败")
             return GetCookieStatus(network_error=True), None
 
 
@@ -1274,6 +1292,7 @@ async def get_ltoken_by_stoken(cookies: BBSCookies, device_id: str = None, retry
         return GetCookieStatus(missing_stoken_v2=True), None
     if not cookies.mid:
         return GetCookieStatus(missing_mid=True), None
+    res = None
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
@@ -1292,15 +1311,14 @@ async def get_ltoken_by_stoken(cookies: BBSCookies, device_id: str = None, retry
                     logger.warning("通过 stoken 获取 ltoken: 登录失效")
                     return GetCookieStatus(login_expired=True), None
                 else:
-                    raise IncorrectReturn
+                    raise _InvalidCredentialResponse()
 
     except tenacity.RetryError as e:
-        if is_incorrect_return(e):
-            logger.exception("通过 stoken 获取 ltoken: 服务器没有正确返回")
-            logger.debug(f"网络请求返回: {res.text}")
+        if is_incorrect_return(e, _InvalidCredentialResponse):
+            _log_invalid_credential_response("通过 stoken 获取 ltoken", res)
             return GetCookieStatus(incorrect_return=True), None
         else:
-            logger.exception("通过 stoken 获取 ltoken: 网络请求失败")
+            logger.warning("通过 stoken 获取 ltoken - 网络请求失败")
             return GetCookieStatus(network_error=True), None
 
 
@@ -1368,7 +1386,7 @@ async def good_exchange(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[Ex
 
     :param plan: 兑换计划
     """
-    headers = HEADERS_EXCHANGE
+    headers = HEADERS_EXCHANGE.copy()
     headers["x-rpc-device_id"] = plan.account.device_id_ios
     headers["x-rpc-device_fp"] = plan.account.device_fp or generate_fp_locally()
     content = {
@@ -1391,7 +1409,7 @@ async def good_exchange(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[Ex
         async with httpx.AsyncClient() as client:
             res = await client.post(
                 URL_EXCHANGE, headers=headers, json=content,
-                cookies=plan.account.cookies.dict(cookie_type=True),
+                cookies=plan.account.cookies.request_cookies("combined"),
                 timeout=plugin_config.preference.timeout)
         api_result = ApiResultHandler(res.json())
         if api_result.login_expired:
@@ -1427,7 +1445,7 @@ def good_exchange_sync(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[Exc
 
     :param plan: 兑换计划
     """
-    headers = HEADERS_EXCHANGE
+    headers = HEADERS_EXCHANGE.copy()
     headers["x-rpc-device_id"] = plan.account.device_id_ios
     headers["x-rpc-device_fp"] = plan.account.device_fp or generate_fp_locally()
     content = {
@@ -1450,7 +1468,7 @@ def good_exchange_sync(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[Exc
         with httpx.Client() as client:
             res = client.post(
                 URL_EXCHANGE, headers=headers, json=content,
-                cookies=plan.account.cookies.dict(cookie_type=True),
+                cookies=plan.account.cookies.request_cookies("combined"),
                 timeout=plugin_config.preference.timeout)
         api_result = ApiResultHandler(res.json())
         if api_result.login_expired:
@@ -1491,10 +1509,10 @@ async def genshin_note(account: UserAccount) -> Tuple[
     """
     game_record_status, records = await get_game_record(account)
     if not game_record_status:
-        return GenshinNoteStatus(game_record_failed=True), None
+        return GenshinNoteStatus(game_record_failed=True, **game_record_status.dict()), None
     game_list_status, game_list = await get_game_list()
     if not game_list_status:
-        return GenshinNoteStatus(game_list_failed=True), None
+        return GenshinNoteStatus(game_list_failed=True, **game_list_status.dict()), None
     game_filter = filter(lambda x: x.en_name == 'ys', game_list)
     game_info = next(game_filter, None)
     if not game_info:
@@ -1518,7 +1536,7 @@ async def genshin_note(account: UserAccount) -> Tuple[
                             res = await client.get(
                                 URL_GENSHEN_NOTE_BBS,
                                 headers=headers,
-                                cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                cookies=account.cookies.request_cookies("combined"),
                                 params=params,
                                 timeout=plugin_config.preference.timeout
                             )
@@ -1544,12 +1562,16 @@ async def genshin_note(account: UserAccount) -> Tuple[
                                 res = await client.get(
                                     URL_GENSHEN_NOTE_WIDGET,
                                     headers=headers,
-                                    cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                                    cookies=account.cookies.request_cookies("combined"),
                                     timeout=plugin_config.preference.timeout
                                 )
                             api_result = ApiResultHandler(res.json())
-                            return GenshinNoteStatus(success=True), \
-                                GenshinNote.parse_obj(api_result.data)
+                            if api_result.login_expired:
+                                return GenshinNoteStatus(login_expired=True), None
+                            if api_result.invalid_ds:
+                                return GenshinNoteStatus(invalid_ds=True), None
+                            if api_result.retcode == 1034:
+                                return GenshinNoteStatus(need_verify=True), None
                         return GenshinNoteStatus(success=True), GenshinNote.parse_obj(api_result.data)
             except tenacity.RetryError as e:
                 if is_incorrect_return(e):
@@ -1574,10 +1596,10 @@ async def starrail_note(account: UserAccount) -> Tuple[
     """
     game_record_status, records = await get_game_record(account)
     if not game_record_status:
-        return StarRailNoteStatus(game_record_failed=True), None
+        return StarRailNoteStatus(game_record_failed=True, **game_record_status.dict()), None
     game_list_status, game_list = await get_game_list()
     if not game_list_status:
-        return StarRailNoteStatus(game_list_failed=True), None
+        return StarRailNoteStatus(game_list_failed=True, **game_list_status.dict()), None
     game_filter = filter(lambda x: x.en_name == 'sr', game_list)
     game_info = next(game_filter, None)
     if not game_info:
@@ -1595,7 +1617,7 @@ async def starrail_note(account: UserAccount) -> Tuple[
                     with attempt:
                         headers["DS"] = generate_ds(data={})
                         async with httpx.AsyncClient() as client:
-                            cookies = account.cookies.dict(v2_stoken=True, cookie_type=True)
+                            cookies = account.cookies.request_cookies("combined")
                             res = await client.get(url, headers=headers,
                                                    cookies=cookies,
                                                    timeout=plugin_config.preference.timeout)
@@ -1610,10 +1632,12 @@ async def starrail_note(account: UserAccount) -> Tuple[
                             logger.info(
                                 f"崩铁实时便笺: 用户 {account.display_name} DS 校验失败")
                             logger.debug(f"网络请求返回: {res.text}")
+                            return StarRailNoteStatus(invalid_ds=True), None
                         if api_result.retcode == 1034:
                             logger.info(
                                 f"崩铁实时便笺: 用户 {account.display_name} 可能被验证码阻拦")
                             logger.debug(f"网络请求返回: {res.text}")
+                            return StarRailNoteStatus(need_verify=True), None
                         return StarRailNoteStatus(success=True), StarRailNote.parse_obj(api_result.data)
             except tenacity.RetryError as e:
                 if is_incorrect_return(e):
@@ -1650,10 +1674,12 @@ async def create_verification(
                     res = await client.get(
                         URL_CREATE_VERIFICATION,
                         headers=headers,
-                        cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                        cookies=account.cookies.request_cookies("app") if account else None,
                         timeout=plugin_config.preference.timeout
                     )
                 api_result = ApiResultHandler(res.json())
+                if api_result.login_expired:
+                    return BaseApiStatus(login_expired=True), None
                 return BaseApiStatus(success=True), MmtData.parse_obj(api_result.data)
     except tenacity.RetryError as e:
         if is_incorrect_return(e):
@@ -1697,10 +1723,12 @@ async def verify_verification(
                     res = await client.post(
                         URL_VERIFY_VERIFICATION,
                         headers=headers,
-                        cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                        cookies=account.cookies.request_cookies("app") if account else None,
                         json=content,
                         timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
+                if api_result.login_expired:
+                    return BaseApiStatus(login_expired=True)
                 if api_result.retcode == 0:
                     return BaseApiStatus(success=True)
                 else:

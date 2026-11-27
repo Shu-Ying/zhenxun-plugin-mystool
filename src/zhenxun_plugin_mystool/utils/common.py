@@ -110,7 +110,7 @@ def get_async_retry(retry: bool):
     """
     return tenacity.AsyncRetrying(
         stop=custom_attempt_times(retry),
-        retry=tenacity.retry_if_exception_type(BaseException),
+        retry=tenacity.retry_if_exception_type(Exception),
         wait=tenacity.wait_fixed(plugin_config.preference.retry_interval),
     )
 
