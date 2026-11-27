@@ -23,7 +23,7 @@ from ..model import (MissionStatus, PluginDataManager, plugin_config, UserData, 
                      StarRailNoteNotice)
 from ..utils import get_file, logger, COMMAND_BEGIN, GeneralMessageEvent, send_private_msg, get_all_bind, \
     get_unique_users, get_validate
-from ..services.credential_expiry import CredentialExpiry
+from ..services.credential_expiry import CredentialExpiry, web_token_expiry_notice
 from ..services.permissions import can_manage_accounts
 
 __all__ = [
@@ -537,6 +537,7 @@ async def perform_bbs_sign(
             if matcher:
                 msgs_list.append(msg)
             else:
+                msg += f"\n{web_token_expiry_notice(account.web_scanned_at)}"
                 for user_id in user_ids:
                     await send_private_msg(user_id=user_id, message=msg)
 

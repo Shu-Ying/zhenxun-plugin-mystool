@@ -1,9 +1,26 @@
+from datetime import datetime, timedelta
 import hashlib
 import json
+
+from pytz import timezone
 
 from ..model.data import UserAccount
 from ..storage.repository import Repository
 from ..utils import COMMAND_BEGIN, logger, send_private_msg
+
+
+WEB_TOKEN_ESTIMATED_DAYS = 30
+_SHANGHAI = timezone("Asia/Shanghai")
+
+
+def web_token_expiry_notice(web_scanned_at: int | None, *, just_scanned: bool = False) -> str:
+    if web_scanned_at is None:
+        return "🔔网页 Token 到期日尚未记录，完成一次 Web 扫码后会显示。"
+    expiry = datetime.fromtimestamp(web_scanned_at, _SHANGHAI).date() + timedelta(days=WEB_TOKEN_ESTIMATED_DAYS)
+    date = expiry.strftime("%Y年%m月%d日")
+    if just_scanned:
+        return f"🔔网页 Token 预计约 {WEB_TOKEN_ESTIMATED_DAYS} 天后过期（{date}），届时请重新扫描网页二维码。"
+    return f"🔔网页 Token 预计于 {date}过期。"
 
 
 def credential_fingerprint(account: UserAccount, family: str) -> str:
@@ -24,8 +41,8 @@ class CredentialExpiry:
         self.reply = reply
 
     def _login_tip(self, family):
-        mode = {"app": "App ", "web": "Web ", "combined": ""}[family]
-        return f"请私聊发送『{COMMAND_BEGIN}登录 {mode}{self.account.bbs_uid}』续登。"
+        mode = {"app": " App", "web": " Web", "combined": ""}[family]
+        return f"请私聊发送『{COMMAND_BEGIN}登录{mode}』后按序号选择账号续登。"
 
     def _message(self, family, operation):
         prefix = f"⚠️账户 {self.account.display_name} 执行{operation}时，服务器返回登录失效。"

@@ -113,6 +113,12 @@ async def _with_database(exchange, records, operation):
         await Tortoise.close_connections()
 
 
+async def _selected_account_state(exchange, actor=OWNER, **state):
+    menus = import_module(f"{exchange.package}.command.account_selection")
+    records = await exchange.storage.Repository.load()
+    return {**state, "account_menu": menus.AccountMenu.from_records(records, actor), "bbs_uid": UID}
+
+
 @pytest.mark.parametrize("async_call", [True, False])
 def test_exchange_request_does_not_modify_shared_device_headers(exchange, monkeypatch, async_call):
     import httpx
@@ -232,7 +238,7 @@ def test_scheduled_exchange_login_expiry_honors_notice_setting(exchange, monkeyp
         assert expiry_notice.await_args.kwargs["user_id"] == OWNER
         message = expiry_notice.await_args.kwargs["message"]
         assert "登录失效" in message
-        assert f"登录 {UID}" in message
+        assert "登录』后按序号" in message
     else:
         expiry_notice.assert_not_awaited()
 
@@ -332,11 +338,10 @@ def test_exchange_confirmation_rejects_a_slot_that_passed_during_selection(excha
     event = SimpleNamespace(get_user_id=lambda: OWNER)
 
     async def run():
+        state = await _selected_account_state(exchange, good=plan.good, scheduled_at=PAST)
         with pytest.raises(FinishedException):
             await command.myb_exchange_plan.handlers[-1].call(
-                event=event, matcher=matcher, state={
-                    "good": plan.good, "scheduled_at": PAST, "bbs_uid": UID,
-                }, game_uid="",
+                event=event, matcher=matcher, state=state, game_uid="",
             )
         return await exchange.storage.Repository.load()
 
@@ -360,12 +365,11 @@ def test_exchange_confirmation_replaces_only_paused_plans_for_the_same_destinati
     event = SimpleNamespace(get_user_id=lambda: OWNER)
 
     async def run():
+        state = await _selected_account_state(exchange, good=plan.good, scheduled_at=original_slot)
         async with exchange.storage.PluginDataManager.session() as session:
             with pytest.raises(FinishedException):
                 await command.myb_exchange_plan.handlers[-1].call(
-                    event=event, matcher=matcher, state={
-                        "good": plan.good, "scheduled_at": original_slot, "bbs_uid": UID,
-                    }, game_uid="",
+                    event=event, matcher=matcher, state=state, game_uid="",
                 )
             assert len(session.data.users[OWNER].exchange_plans) == 2
         return await exchange.storage.Repository.load()
@@ -386,9 +390,9 @@ def test_exchange_deletion_requests_selection_when_goods_id_matches_multiple_pla
     command = import_module(f"{exchange.package}.command.exchange")
     matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
     event = SimpleNamespace(get_user_id=lambda: OWNER)
-    state = {"command_2": "-", "bbs_uid": UID}
 
     async def run():
+        state = await _selected_account_state(exchange, command_2="-")
         await exchange.jobs.restore_exchange_jobs()
         await command.myb_exchange_plan.handlers[-2].call(
             event=event, matcher=matcher, state=state, good_id=GOODS_ID,
@@ -419,9 +423,9 @@ def test_exchange_deletion_rejects_a_choice_after_the_user_is_unbound(exchange):
     command = import_module(f"{exchange.package}.command.exchange")
     matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
     event = SimpleNamespace(get_user_id=lambda: "alias")
-    state = {"command_2": "-", "bbs_uid": UID}
 
     async def run():
+        state = await _selected_account_state(exchange, actor="alias", command_2="-")
         await command.myb_exchange_plan.handlers[-2].call(
             event=event, matcher=matcher, state=state, good_id=GOODS_ID,
         )
@@ -434,7 +438,7 @@ def test_exchange_deletion_rejects_a_choice_after_the_user_is_unbound(exchange):
 
     stored = asyncio.run(_with_database(exchange, records, run))
 
-    assert "绑定已变化" in matcher.finish.await_args.args[0]
+    assert "绑定关系发生变化" in matcher.finish.await_args.args[0]
     assert len(stored["plans"]) == 2
 
 
@@ -448,11 +452,60 @@ def test_virtual_exchange_without_game_records_prompts_player_to_bind_game(excha
     event = SimpleNamespace(get_user_id=lambda: OWNER)
 
     async def run():
+        state = await _selected_account_state(exchange, command_2="+")
         with pytest.raises(FinishedException):
             await command.myb_exchange_plan.handlers[-2].call(
-                event=event, matcher=matcher, state={"command_2": "+", "bbs_uid": UID}, good_id=GOODS_ID,
+                event=event, matcher=matcher, state=state, good_id=GOODS_ID,
             )
 
     asyncio.run(_with_database(exchange, records, run))
 
     assert "还没有绑定游戏账号" in matcher.finish.await_args.args[0]
+
+
+@pytest.mark.parametrize("virtual", [True, False])
+def test_exchange_uses_game_role_uid_or_shipping_address_after_account_selection(exchange, monkeypatch, virtual):
+    plan = _plan(exchange, FUTURE, virtual=virtual)
+    plan.good.game_biz = "hk4e_cn"
+    if not virtual:
+        common = import_module(f"{exchange.package}.model.common")
+        plan.account.address = common.Address(
+            connect_areacode="+86", connect_mobile="10000000000", province_name="省",
+            city_name="市", county_name="区", addr_ext="街道", connect_name="收件人", id="678",
+        )
+    records = _records(exchange, plan)
+    records["plans"].clear()
+    command = import_module(f"{exchange.package}.command.exchange")
+    monkeypatch.setattr(command, "get_good_list", AsyncMock(return_value=(True, [plan.good])))
+    monkeypatch.setattr(command, "get_game_record", AsyncMock(return_value=(True, [plan.game_record])))
+    matcher = command.myb_exchange_plan()
+    matcher.send = AsyncMock()
+    matcher.finish = AsyncMock(side_effect=FinishedException)
+    event = SimpleNamespace(get_user_id=lambda: OWNER)
+
+    async def run():
+        matcher.state.update(await _selected_account_state(exchange, command_2="+"))
+        await command.myb_exchange_plan.handlers[-2].call(
+            event=event, matcher=matcher, state=matcher.state, good_id=GOODS_ID,
+        )
+        if virtual:
+            assert "UID 1001" in matcher.send.await_args.args[0]
+            game_uid = "1001"
+        else:
+            prefilled = matcher.get_arg("game_uid")
+            assert prefilled is not None
+            game_uid = str(prefilled)
+        with pytest.raises(FinishedException):
+            await command.myb_exchange_plan.handlers[-1].call(
+                event=event, matcher=matcher, state=matcher.state, game_uid=game_uid,
+            )
+        return await exchange.storage.Repository.load()
+
+    stored = asyncio.run(_with_database(exchange, records, run))
+
+    saved, = stored["plans"].values()
+    assert saved["bbs_uid"] == UID
+    if virtual:
+        assert saved["game_record"]["game_role_id"] == "1001"
+    else:
+        assert saved["address"]["id"] == "678"

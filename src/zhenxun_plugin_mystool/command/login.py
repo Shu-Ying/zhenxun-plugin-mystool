@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
+from time import time
 from typing import Union
 
 from nonebot import on_command
@@ -13,9 +14,15 @@ from tortoise.exceptions import BaseORMException
 
 from ..api.common import get_device_fp
 from ..api.passport import PassportClient, PassportError, PassportRefused, QrExpired
+from ..api.profile import fetch_community_nickname
+from ..command.account_selection import (
+    AccountMenu, InvalidAccountChoice, StaleAccountChoice, ask_for_account, select_account,
+)
 from ..command.common import CommandRegistry
-from ..model import PluginDataManager, plugin_config, plugin_env, CommandUsage
-from ..services.login import LoginConflict, select_login, write_login
+from ..model import BBSCookies, plugin_config, plugin_env, CommandUsage
+from ..services.account_profiles import refresh_account_profiles
+from ..services.credential_expiry import web_token_expiry_notice
+from ..services.login import LoginConflict, login_cookies, select_login, write_login
 from ..storage import data_session
 from ..storage.repository import ConcurrentUpdateError, Repository
 from ..utils import (
@@ -46,8 +53,8 @@ CommandRegistry.set_usage(
     get_cookie,
     CommandUsage(
         name="登录",
-        description="私聊扫码绑定米游社账号或续登。已有账号可用「登录 UID」续登，"
-        "也可用「登录 App UID」或「登录 Web UID」只刷新指定凭据。发送「登录 取消」结束扫码。",
+        description="私聊扫码绑定米游社账号，或按序号选择账号续登。"
+        "「登录 App」和「登录 Web」可单独刷新指定凭据。发送「登录 取消」结束扫码。",
     ),
 )
 
@@ -67,16 +74,33 @@ async def prepare_login(event: MessageEvent, matcher: Matcher, args: Message = C
                 await matcher.finish()
         await matcher.finish("当前没有可以取消的扫码。")
 
+    refresh = choice.lower() if choice.lower() in {"app", "web"} else None
+    if choice not in {"", "新增"} and refresh is None:
+        await matcher.finish(f"请私聊发送「{COMMAND_BEGIN}登录」，再按列表回复序号。")
     records = await Repository.load()
     owner = records["bindings"].get(actor, actor)
     if has_active_login(owner, actor):
         await matcher.finish("正在等待扫码确认。发起者可以发送登录命令加「取消」结束。")
 
-    accounts = sorted(uid for owner_id, uid in records["accounts"] if owner_id == owner)
-    if choice or not accounts:
-        matcher.set_arg("login_target", Message(choice or "新增"))
+    if choice != "新增":
+        records = await refresh_account_profiles(records, actor)
+    menu = AccountMenu.from_records(records, actor)
+    matcher.state["account_menu"] = menu
+    matcher.state["login_refresh"] = refresh
+    if refresh and not menu:
+        await matcher.finish(f"当前没有可续登的账号，请先私聊发送「{COMMAND_BEGIN}登录」。")
+    if choice == "新增" or not menu:
+        matcher.set_arg("login_target", Message("0"))
         return
-    await matcher.send("请选择续登账号，回复米游社 UID 或回复「新增」：\n" + "\n".join(accounts))
+    await matcher.send(menu.prompt(login_menu_title(refresh), allow_new=refresh is None))
+
+
+def login_menu_title(refresh):
+    if refresh == "app":
+        return "请选择要刷新 App 凭据的账号"
+    if refresh == "web":
+        return "请选择要刷新网页凭据的账号"
+    return "请选择要续登的账号"
 
 
 @get_cookie.got("login_target")
@@ -84,17 +108,27 @@ async def login_account(event: PrivateMessageEvent, matcher: Matcher, login_targ
     choice = login_target.strip()
     if choice in {"取消", "退出"}:
         await matcher.finish("已取消登录。")
-    family, _, value = choice.partition(" ")
-    refresh = family.casefold() if family.casefold() in {"app", "web"} else None
-    uid = value.strip() if refresh else choice
-    if (uid != "新增" or refresh) and (not uid.isascii() or not uid.isdecimal()):
-        await matcher.reject("请输入米游社 UID、App UID、Web UID、「新增」或「取消」。")
+    actor = event.get_user_id()
+    refresh = matcher.state.get("login_refresh")
+    records = await Repository.load()
+    current = AccountMenu.from_records(records, actor)
+    menu = matcher.state.get("account_menu")
+    if refresh and not current:
+        await matcher.finish(f"当前没有可续登的账号，请先私聊发送「{COMMAND_BEGIN}登录」。")
+    try:
+        if menu is None:
+            raise StaleAccountChoice
+        uid = menu.pick(choice, current, allow_new=refresh is None)
+    except StaleAccountChoice:
+        matcher.state["account_menu"] = current
+        await matcher.reject(current.prompt(
+            f"账号列表已变化。{login_menu_title(refresh)}", allow_new=refresh is None,
+        ))
+    except InvalidAccountChoice:
+        await matcher.reject(menu.prompt(login_menu_title(refresh), allow_new=refresh is None))
 
     try:
-        target = select_login(
-            await Repository.load(), event.get_user_id(),
-            None if uid == "新增" else uid, refresh=refresh,
-        )
+        target = select_login(records, actor, uid, refresh=refresh)
     except LoginConflict as exc:
         await matcher.finish(str(exc))
 
@@ -104,11 +138,27 @@ async def login_account(event: PrivateMessageEvent, matcher: Matcher, login_targ
     login = ActiveLogin(target.actor, asyncio.create_task(collect_credentials(matcher, target)))
     _active_logins[target.owner] = login
     try:
-        app, web, device_fp = await login.scan
-        uid = await Repository.update(lambda records: write_login(
-            records, target, app, web, target.device_id, device_fp,
-            max_users=plugin_config.preference.max_user,
-        ))
+        app, web, device_fp, web_scanned_at = await login.scan
+        uid = target.uid or app.uid
+        old_account = records["accounts"].get((target.owner, uid), {})
+        cookies = BBSCookies.parse_obj(login_cookies(uid, old_account.get("cookies") or {}, app, web))
+        device_id = old_account.get("device_id_android") or target.device_id
+        try:
+            nickname = await fetch_community_nickname(uid, device_id, cookies)
+        except Exception as exc:
+            logger.warning(f"米游社社区昵称查询失败：{type(exc).__name__}")
+            nickname = None
+
+        def save_login(current_records):
+            saved_uid = write_login(
+                current_records, target, app, web, target.device_id, device_fp,
+                max_users=plugin_config.preference.max_user, community_nickname=nickname,
+                web_scanned_at=web_scanned_at,
+            )
+            account = current_records["accounts"][(target.owner, saved_uid)]
+            return AccountMenu.from_records(current_records, actor).label_for(saved_uid), account.get("web_scanned_at")
+
+        display_name, saved_web_scan = await Repository.update(save_login)
     except asyncio.CancelledError:
         if login.cancelled:
             await matcher.finish("已取消扫码，原账号数据已保留。")
@@ -131,7 +181,8 @@ async def login_account(event: PrivateMessageEvent, matcher: Matcher, login_targ
 
     logger.info(f"米游社账号 {uid} 的登录凭据已保存")
     result = "绑定成功" if target.uid is None else "续登成功"
-    await matcher.finish(f"米游社账号 {uid} {result}。")
+    expiry_tip = web_token_expiry_notice(saved_web_scan, just_scanned=web_scanned_at is not None)
+    await matcher.finish(f"米游社账号「{display_name}」{result}。\n{expiry_tip}")
 
 
 async def send_qr(matcher: Matcher, kind: str, qr):
@@ -149,7 +200,7 @@ async def collect_credentials(matcher: Matcher, target):
         retry_attempts=(preference.max_retry_times or 0) + 1,
         retry_interval=preference.retry_interval,
     ) as client:
-        app = web = device_fp = None
+        app = web = device_fp = web_scanned_at = None
         if target.need_app:
             qr = await client.create_app_qr(target.device_id)
             await send_qr(matcher, "App 登录", qr)
@@ -170,11 +221,12 @@ async def collect_credentials(matcher: Matcher, target):
                 web = await client.wait_web_qr(qr)
             if (target.uid or app.uid) != web.uid:
                 raise LoginConflict("网页二维码扫描的是另一个米游社账号。")
+            web_scanned_at = int(time())
         if app:
             device = await get_device_fp(target.device_id, retry=False)
             if device:
                 _, device_fp = device
-        return app, web, device_fp
+        return app, web, device_fp, web_scanned_at
 
 
 output_cookies = on_command(
@@ -195,38 +247,17 @@ CommandRegistry.set_usage(
 
 @output_cookies.handle()
 @data_session
-async def handle_first_receive(event: Union[GeneralMessageEvent], state: T_State):
-    """
-    Cookies导出命令触发
-    """
+async def prepare_export(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State):
     if isinstance(event, GeneralGroupMessageEvent):
-        await output_cookies.finish("⚠️为了保护您的隐私，请私聊进行Cookies导出。")
-    user = PluginDataManager.plugin_data.users.get(event.get_user_id())
-    user_account = user.accounts if user else {}
-    if not user_account:
-        await output_cookies.finish(f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录")
-    elif len(user_account) == 1:
-        account = next(iter(user_account.values()))
-        state["bbs_uid"] = account.bbs_uid
-    else:
-        msg = "您有多个账号，您要导出哪个账号的Cookies数据？\n"
-        msg += "\n".join(map(lambda x: f"🆔{x}", user_account))
-        msg += "\n🚪发送“退出”即可退出"
-        await output_cookies.send(msg)
+        await matcher.finish("⚠️为了保护您的隐私，请私聊进行 Cookies 导出。")
+    await ask_for_account(matcher, state, event, "请选择要导出 Cookies 的账号")
 
 
-@output_cookies.got('bbs_uid')
+@output_cookies.got("account_choice")
 @data_session
-async def _(event: Union[GeneralPrivateMessageEvent], matcher: Matcher, bbs_uid=ArgStr()):
-    """
-    根据手机号设置导出相应的账户的Cookies
-    """
-    if bbs_uid == '退出':
-        await matcher.finish('🚪已成功退出')
-    user = PluginDataManager.plugin_data.users.get(event.get_user_id())
-    user_account = user.accounts if user else {}
-    if bbs_uid in user_account:
-        cookies = user_account[bbs_uid].cookies.dict(v2_stoken=True, cookie_type=True)
-        await matcher.finish(json.dumps(cookies, indent=4))
-    else:
-        await matcher.reject('⚠️您输入的账号不在以上账号内，请重新输入')
+async def export_account_cookies(
+    event: Union[GeneralPrivateMessageEvent], matcher: Matcher, state: T_State, account_choice=ArgStr(),
+):
+    account = await select_account(matcher, state, event, account_choice, "请选择要导出 Cookies 的账号")
+    cookies = account.cookies.dict(v2_stoken=True, cookie_type=True)
+    await matcher.finish(json.dumps(cookies, indent=4))

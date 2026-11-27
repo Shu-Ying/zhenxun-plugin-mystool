@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections import Counter
 
 
 def plan_key(plan):
@@ -34,7 +35,11 @@ def encode(data):
             user.json(exclude={"accounts", "exchange_plans"})
         )
         for uid, account in user.accounts.items():
-            records["accounts"][(user_id, uid)] = json.loads(account.json())
+            exclude = {
+                field for field in ("community_nickname", "web_scanned_at")
+                if getattr(account, field) is None
+            }
+            records["accounts"][(user_id, uid)] = json.loads(account.json(exclude=exclude))
         for plan in user.exchange_plans:
             payload = json.loads(plan.json(exclude={"account", "legacy_plan_id"}))
             payload["bbs_uid"] = plan.account.bbs_uid
@@ -62,6 +67,11 @@ def decode(records):
     users = {uid: UserData.parse_obj(value) for uid, value in records["users"].items()}
     for (uid, bbs_uid), value in records["accounts"].items():
         users[uid].accounts[bbs_uid] = UserAccount.parse_obj(value)
+    for user in users.values():
+        names = Counter(account.display_name.casefold() for account in user.accounts.values())
+        for account in user.accounts.values():
+            if names[account.display_name.casefold()] > 1:
+                account.disambiguate_display_name()
     for (uid, stored_id), value in records["plans"].items():
         payload = dict(value)
         account = users[uid].accounts[payload.pop("bbs_uid")]

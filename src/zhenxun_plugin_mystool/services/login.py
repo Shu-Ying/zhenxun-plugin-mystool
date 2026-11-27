@@ -48,7 +48,28 @@ def select_login(records, actor: str, uid: str | None, *, refresh: str | None = 
     )
 
 
-def write_login(records, target: LoginTarget, app, web, device_id: str, device_fp: str | None, *, max_users: int) -> str:
+def login_cookies(uid: str, existing: dict, app, web) -> dict:
+    cookies = existing.copy()
+    app_mid = app.mid if app else cookies.get("mid")
+    web_mid = web.mid if web else cookies.get("ltmid_v2")
+    if app_mid and web_mid and app_mid != web_mid:
+        raise LoginConflict("两套凭据的账号标识不一致，请核对米游社登录账号。")
+    cookies.update(stuid=uid, ltuid=uid, account_id=uid, login_uid=uid)
+    if app:
+        cookies.update(stoken_v1=None, stoken_v2=app.stoken, mid=app.mid)
+    if web:
+        cookies.update(
+            ltuid_v2=uid, account_id_v2=uid, ltmid_v2=web.mid, account_mid_v2=web.mid,
+            ltoken_v2=web.ltoken, cookie_token_v2=web.cookie_token, login_ticket=web.login_ticket,
+            ltoken=None, cookie_token=None,
+        )
+    return cookies
+
+
+def write_login(
+    records, target: LoginTarget, app, web, device_id: str, device_fp: str | None,
+    *, max_users: int, community_nickname: str | None = None, web_scanned_at: int | None = None,
+) -> str:
     owner = records["bindings"].get(target.actor, target.actor)
     owner_data = records["users"].get(owner)
     if owner != target.owner or (owner_data or {}).get("uuid") != target.owner_uuid:
@@ -69,30 +90,21 @@ def write_login(records, target: LoginTarget, app, web, device_id: str, device_f
     if owner_data is None and max_users > 0 and len(records["users"]) >= max_users:
         raise LoginConflict("机器人已达到用户数上限，已有账号仍可续登。")
 
-    cookies = dict((record or {}).get("cookies") or {})
-    app_mid = app.mid if app else cookies.get("mid")
-    web_mid = web.mid if web else cookies.get("ltmid_v2")
-    if app_mid and web_mid and app_mid != web_mid:
-        raise LoginConflict("两套凭据的账号标识不一致，请核对米游社登录账号。")
-    cookies.update(stuid=uid, ltuid=uid, account_id=uid, login_uid=uid)
-    if app:
-        cookies.update(stoken_v1=None, stoken_v2=app.stoken, mid=app.mid)
-    if web:
-        cookies.update(
-            ltuid_v2=uid, account_id_v2=uid, ltmid_v2=web.mid, account_mid_v2=web.mid,
-            ltoken_v2=web.ltoken, cookie_token_v2=web.cookie_token, login_ticket=web.login_ticket,
-            ltoken=None, cookie_token=None,
-        )
+    cookies = login_cookies(uid, (record or {}).get("cookies") or {}, app, web)
     if record is None:
         account = UserAccount(
             cookies=BBSCookies.parse_obj(cookies), device_id_ios=device_id,
             device_id_android=generate_device_id(), device_fp=device_fp,
         )
-        record = json.loads(account.json())
+        record = json.loads(account.json(exclude={"community_nickname", "web_scanned_at"}))
     else:
         record["cookies"] = cookies
         if app and (device_fp or device_id != record.get("device_id_ios")):
             record.update(device_id_ios=device_id, device_fp=device_fp)
+    if community_nickname:
+        record["community_nickname"] = community_nickname
+    if web is not None and web_scanned_at is not None:
+        record["web_scanned_at"] = web_scanned_at
 
     versions = record.setdefault("credential_versions", {})
     expired = record.setdefault("expired_credentials", {})

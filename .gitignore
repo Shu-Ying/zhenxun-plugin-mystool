@@ -155,3 +155,6 @@ tests/*
 !tests/test_passport.py
 !tests/test_credential_expiry.py
 !tests/test_exchange_schedule.py
+!tests/test_account_selection.py
+!tests/test_account_profiles.py
+!tests/test_account_commands.py

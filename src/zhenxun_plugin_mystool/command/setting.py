@@ -7,8 +7,9 @@ from nonebot.matcher import Matcher
 from nonebot.params import T_State
 
 from ..api import BaseMission, BaseGameSign
-from ..command.common import CommandRegistry
-from ..model import PluginDataManager, plugin_config, UserAccount, CommandUsage
+from .account_selection import ask_for_account, require_selected_account, save_selected_account, select_account
+from .common import CommandRegistry
+from ..model import PluginDataManager, plugin_config, CommandUsage
 from ..utils import COMMAND_BEGIN, GeneralMessageEvent
 
 __all__ = ["setting", "account_setting", "global_setting"]
@@ -34,6 +35,7 @@ async def _(_: Union[GeneralMessageEvent]):
 
 
 account_setting = on_command(plugin_config.preference.command_start + '账号设置', priority=5, block=True)
+ACCOUNT_PROMPT = "请选择要更改设置的米游社账号。"
 
 CommandRegistry.set_usage(
     account_setting,
@@ -47,37 +49,13 @@ CommandRegistry.set_usage(
 @account_setting.handle()
 @data_session
 async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State):
-    """
-    账号设置命令触发
-    """
-    user = PluginDataManager.plugin_data.users.get(event.get_user_id())
-    user_account = user.accounts if user else None
-    if not user_account:
-        await account_setting.finish(
-            f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录")
-    if len(user_account) == 1:
-        uid = next(iter(user_account.values())).bbs_uid
-        state["bbs_uid"] = uid
-    else:
-        msg = "您有多个账号，您要更改以下哪个账号的设置？\n"
-        msg += "\n".join(map(lambda x: f"🆔{x.display_name}", user_account.values()))
-        msg += "\n🚪发送“退出”即可退出"
-        await matcher.send(msg)
+    await ask_for_account(matcher, state, event, ACCOUNT_PROMPT)
 
 
-@account_setting.got('bbs_uid')
+@account_setting.got('account_choice')
 @data_session
-async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State, bbs_uid=ArgStr()):
-    """
-    根据手机号设置相应的账户
-    """
-    if bbs_uid == '退出':
-        await matcher.finish('🚪已成功退出')
-
-    user_account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts
-    if not (account := user_account.get(bbs_uid)):
-        await account_setting.reject('⚠️您发送的账号不在以上账号内，请重新发送')
-    state["bbs_uid"] = bbs_uid
+async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State, account_choice=ArgStr()):
+    account = await select_account(matcher, state, event, account_choice, ACCOUNT_PROMPT)
     state["prepare_to_delete"] = False
 
     user_setting = ""
@@ -118,23 +96,20 @@ async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State,
 
 @account_setting.got('setting_id')
 @data_session
-async def _(event: Union[GeneralMessageEvent], state: T_State, setting_id=ArgStr()):
+async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State, setting_id=ArgStr()):
     """
     根据所选更改相应账户的相应设置
     """
-    user_account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts
-    account = user_account.get(state["bbs_uid"])
-    if account is None:
-        await account_setting.finish("⚠️账号已不存在，请重新选择")
     if setting_id == '退出':
         await account_setting.finish('🚪已成功退出')
-    elif setting_id == '1':
+    account = await require_selected_account(matcher, state, event)
+    if setting_id == '1':
         account.enable_mission = not account.enable_mission
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         await account_setting.finish(f"📅米游币任务自动执行已 {'✅开启' if account.enable_mission else '❌关闭'}")
     elif setting_id == '2':
         account.enable_game_sign = not account.enable_game_sign
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         await account_setting.finish(f"📅米哈游游戏自动签到已 {'✅开启' if account.enable_game_sign else '❌关闭'}")
     elif setting_id == '3':
         signable_games = "、".join(f"『{game.name}』" for game in BaseGameSign.available_game_signs)
@@ -153,7 +128,7 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_id=ArgStr
         else:
             account.platform = "ios"
             platform_show = "iOS"
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         await account_setting.finish(f"📲设备平台已更改为 {platform_show}")
     elif setting_id == '5':
         games_show = "、".join(map(lambda x: f"『{x.name}』", BaseMission.available_games.values()))
@@ -167,7 +142,7 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_id=ArgStr
         state["setting_item"] = "mission_games"
     elif setting_id == '6':
         account.enable_resin = not account.enable_resin
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         await account_setting.finish(f"📅原神、星穹铁道便笺提醒已 {'✅开启' if account.enable_resin else '❌关闭'}")
     elif setting_id == '7':
         await account_setting.send(
@@ -180,17 +155,19 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_id=ArgStr
         return
     elif setting_id == '8':
         state["prepare_to_delete"] = True
-        await account_setting.reject(f"⚠️确认删除账号 {account.display_name} ？发送 \"确认删除\" 以确定。")
+        label = state["account_menu"].label_for(account.bbs_uid)
+        await account_setting.reject(f"⚠️确认删除账号 {label} ？发送 \"确认删除\" 以确定。")
     elif setting_id == '确认删除' and state["prepare_to_delete"]:
         user = PluginDataManager.plugin_data.users[event.get_user_id()]
         removed = [plan for plan in user.exchange_plans if plan.account.bbs_uid == account.bbs_uid]
         user.exchange_plans.difference_update(removed)
-        user_account.pop(account.bbs_uid)
-        await PluginDataManager.save()
+        user.accounts.pop(account.bbs_uid)
+        await save_selected_account(matcher, state, event)
         from ..services.exchange_jobs import cancel_plan
         for plan in removed:
             cancel_plan(event.get_user_id(), plan)
-        await account_setting.finish(f"已删除账号 {account.display_name} 的数据")
+        label = state["account_menu"].label_for(account.bbs_uid)
+        await account_setting.finish(f"已删除账号 {label} 的数据")
     else:
         await account_setting.reject("⚠️您的输入有误，请重新输入")
     state["notice_game"] = ""
@@ -222,12 +199,10 @@ async def _(_: Union[GeneralMessageEvent], state: T_State, notice_game=ArgStr())
 
 @account_setting.got('setting_value')
 @data_session
-async def _(event: Union[GeneralMessageEvent], state: T_State, setting_value=ArgStr()):
+async def _(event: Union[GeneralMessageEvent], matcher: Matcher, state: T_State, setting_value=ArgStr()):
     if setting_value == '退出':
         await account_setting.finish('🚪已成功退出')
-    account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts.get(state["bbs_uid"])
-    if account is None:
-        await account_setting.finish("⚠️账号已不存在，请重新选择")
+    account = await require_selected_account(matcher, state, event)
 
     if state["setting_item"] == "setting_notice_value_op":
         try:
@@ -238,7 +213,7 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_value=Arg
             if 0 <= resin_threshold <= 200:
                 # 输入有效的数字范围，将 resin_threshold 赋值为输入的整数
                 account.user_resin_threshold = resin_threshold
-                await PluginDataManager.save()
+                await save_selected_account(matcher, state, event)
                 await account_setting.finish("更改原神便笺树脂提醒阈值成功\n"
                                              f"⏰当前提醒阈值：{resin_threshold}")
             else:
@@ -253,7 +228,7 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_value=Arg
             if 0 <= stamina_threshold <= 240:
                 # 输入有效的数字范围，将 stamina_threshold 赋值为输入的整数
                 account.user_stamina_threshold = stamina_threshold
-                await PluginDataManager.save()
+                await save_selected_account(matcher, state, event)
                 await account_setting.finish("更改崩铁便笺开拓力提醒阈值成功\n"
                                              f"⏰当前提醒阈值：{stamina_threshold}")
             else:
@@ -272,7 +247,7 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_value=Arg
                 sign_games.append(game_name)
 
         account.game_sign_games = sign_games
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         setting_value = setting_value.replace(" ", "、")
         await account_setting.finish(f"💬执行签到的游戏已更改为『{setting_value}』")
 
@@ -289,7 +264,7 @@ async def _(event: Union[GeneralMessageEvent], state: T_State, setting_value=Arg
                 mission_games.append(game_name)
 
         account.mission_games = mission_games
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         setting_value = setting_value.replace(" ", "、")
         await account_setting.finish(f"💬执行米游币任务的频道已更改为『{setting_value}』")
 

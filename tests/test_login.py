@@ -1,7 +1,8 @@
 import asyncio
+from datetime import datetime, timezone
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from nonebot.exception import FinishedException
 import pytest
@@ -112,8 +113,13 @@ def test_login_matcher_stages_two_codes_and_then_renews_with_web_only(mystool, m
     monkeypatch.setattr(command, "PassportClient", lambda **_: client)
     monkeypatch.setattr(command, "send_qr", AsyncMock())
     monkeypatch.setattr(command, "get_device_fp", AsyncMock(return_value=(True, "saved-fp")))
+    first_scan = int(datetime(2026, 11, 27, 17, tzinfo=timezone.utc).timestamp())
+    second_scan = int(datetime(2026, 11, 29, 17, tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr(command, "time", Mock(side_effect=[first_scan, second_scan]), raising=False)
+    nickname = AsyncMock(side_effect=["星夜", None])
+    monkeypatch.setattr(command, "fetch_community_nickname", nickname)
     event = SimpleNamespace(get_user_id=lambda: "owner")
-    matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
+    matcher = SimpleNamespace(state={}, send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
 
     async def scenario():
         await Tortoise.init(db_url="sqlite://:memory:", modules={"models": [f"{package}.storage.models"]})
@@ -121,29 +127,55 @@ def test_login_matcher_stages_two_codes_and_then_renews_with_web_only(mystool, m
             await Tortoise.generate_schemas()
             await command.Repository.initialize()
 
+            matcher.state["account_menu"] = command.AccountMenu.from_records(await command.Repository.load(), "owner")
             with pytest.raises(FinishedException):
-                await command.login_account(event, matcher, "新增")
+                await command.login_account(event, matcher, "0")
             first = (await command.Repository.load())["accounts"][("owner", "42")]
             assert first["cookies"]["stoken_v2"] == "v2_app"
             assert first["cookies"]["cookie_token_v2"] == "v2_cookie"
             assert first["credential_versions"] == {"app": 1, "web": 1}
+            assert first["community_nickname"] == "星夜"
+            assert first["web_scanned_at"] == first_scan
             assert client.create_app_qr.await_count == 1
             assert client.create_web_qr.await_count == 2
             assert "绑定成功" in matcher.finish.await_args.args[0]
+            assert "星夜" in matcher.finish.await_args.args[0]
+            assert "约 30 天后" in matcher.finish.await_args.args[0]
+            assert "2026年12月28日" in matcher.finish.await_args.args[0]
+            assert "42" not in matcher.finish.await_args.args[0]
 
+            matcher.state["account_menu"] = command.AccountMenu.from_records(await command.Repository.load(), "owner")
             with pytest.raises(FinishedException):
-                await command.login_account(event, matcher, "42")
+                await command.login_account(event, matcher, "1")
             renewed = (await command.Repository.load())["accounts"][("owner", "42")]
             assert renewed["credential_versions"] == {"app": 1, "web": 2}
             assert renewed["device_fp"] == "saved-fp"
+            assert renewed["community_nickname"] == "星夜"
+            assert renewed["web_scanned_at"] == second_scan
             assert client.create_app_qr.await_count == 1
             assert client.create_web_qr.await_count == 3
             assert client.create_web_qr.await_args.args == (first["device_id_ios"],)
-            assert "续登成功" in matcher.finish.await_args.args[0]
+            assert "星夜" in matcher.finish.await_args.args[0] and "续登成功" in matcher.finish.await_args.args[0]
+            assert "2026年12月30日" in matcher.finish.await_args.args[0]
+            assert "42" not in matcher.finish.await_args.args[0]
+            assert nickname.await_args_list[0].args[2].stoken_v2 == "v2_app"
         finally:
             await Tortoise.close_connections()
 
     asyncio.run(scenario())
+
+
+def test_app_refresh_preserves_the_last_web_scan_time(mystool, login_records):
+    login = import_module(f"{mystool.__name__}.services.login")
+    passport = import_module(f"{mystool.__name__}.api.passport")
+    account = login_records["accounts"][("owner", "42")]
+    account["web_scanned_at"] = 17
+    target = login.select_login(login_records, "friend", "42", refresh="app")
+    app = passport.AppCredentials(uid="42", mid="same-mid", stoken="v2_new")
+
+    login.write_login(login_records, target, app, None, "old-device", None, max_users=1)
+
+    assert account["web_scanned_at"] == 17
 
 
 def test_cancelled_second_scan_leaves_new_account_unwritten(mystool, monkeypatch):
@@ -162,11 +194,12 @@ def test_cancelled_second_scan_leaves_new_account_unwritten(mystool, monkeypatch
     save = AsyncMock()
     monkeypatch.setattr(command.Repository, "update", save)
     event = SimpleNamespace(get_user_id=lambda: "owner")
-    matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
+    matcher = SimpleNamespace(state={}, send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
 
     async def scenario():
+        matcher.state["account_menu"] = command.AccountMenu.from_records(await command.Repository.load(), "owner")
         with pytest.raises(FinishedException):
-            await command.login_account(event, matcher, "新增")
+            await command.login_account(event, matcher, "0")
         save.assert_not_awaited()
         assert "取消扫码" in matcher.finish.await_args.args[0]
         assert "owner" not in command._active_logins
@@ -181,7 +214,9 @@ def test_private_cancel_command_stops_active_scan(mystool, monkeypatch):
     save = AsyncMock()
     monkeypatch.setattr(command.Repository, "update", save)
     event = command.PrivateMessageEvent.model_construct(user_id=123)
-    login_matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
+    login_matcher = SimpleNamespace(
+        state={}, set_arg=Mock(), send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException),
+    )
     cancel_matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException))
 
     async def scenario():
@@ -192,7 +227,9 @@ def test_private_cancel_command_stops_active_scan(mystool, monkeypatch):
             await asyncio.Event().wait()
 
         monkeypatch.setattr(command, "collect_credentials", wait_for_scan)
-        login = asyncio.create_task(command.login_account(event, login_matcher, "新增"))
+        await command.prepare_login(event, login_matcher, command.Message())
+        assert str(login_matcher.set_arg.call_args.args[1]) == "0"
+        login = asyncio.create_task(command.login_account(event, login_matcher, "0"))
         await asyncio.wait_for(started.wait(), timeout=2)
         with pytest.raises(FinishedException):
             await command.prepare_login(event, cancel_matcher, command.Message("取消"))
@@ -203,6 +240,34 @@ def test_private_cancel_command_stops_active_scan(mystool, monkeypatch):
         assert "123" not in command._active_logins
 
     asyncio.run(scenario())
+
+
+def test_explicit_web_renewal_starts_with_a_numbered_menu(mystool, monkeypatch):
+    command = import_module(f"{mystool.__name__}.command.login")
+    uid = "73736863"
+    event = command.PrivateMessageEvent.model_construct(user_id=123)
+    matcher = SimpleNamespace(
+        state={}, set_arg=Mock(), send=AsyncMock(), finish=AsyncMock(side_effect=FinishedException),
+    )
+    records = {
+        "users": {"123": {"uuid": "owner-version"}},
+        "bindings": {}, "plans": {},
+        "accounts": {
+            ("123", uid): {
+                "cookies": {"stuid": uid},
+                "community_nickname": "星夜",
+                "device_id_ios": "ios-device", "device_id_android": "android-device",
+            },
+        },
+    }
+    monkeypatch.setattr(command.Repository, "load", AsyncMock(return_value=records))
+
+    asyncio.run(command.prepare_login(event, matcher, command.Message("Web")))
+    reply = str(matcher.send.await_args.args[0])
+    assert matcher.state["login_refresh"] == "web"
+    assert "1. 星夜" in reply
+    assert "新增账号" not in reply
+    assert uid not in reply
 
 
 def test_android_sign_does_not_send_a_request_when_app_auth_is_blocked(mystool, monkeypatch):

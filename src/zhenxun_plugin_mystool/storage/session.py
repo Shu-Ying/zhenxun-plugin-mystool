@@ -20,12 +20,12 @@ class DataSession:
         self.base = deepcopy(records)
         self.data = decode(deepcopy(records))
 
-    async def save(self):
+    async def save(self, *, check=None):
         try:
             pending = encode(self.data)
-            if pending == self.base:
+            if pending == self.base and check is None:
                 return
-            await Repository.commit(self.base, pending)
+            await Repository.commit(self.base, pending, check=check)
         except Exception as error:
             self.data = decode(deepcopy(self.base))
             logger.error(f"mystool 数据库事务未提交：{type(error).__name__}")
@@ -59,11 +59,11 @@ class PluginDataManager(metaclass=ManagerMeta):
             _session.reset(token)
 
     @classmethod
-    async def save(cls):
+    async def save(cls, *, check=None):
         session = _session.get()
         if session is None or session.owner is not asyncio.current_task():
             raise RuntimeError("数据库保存缺少业务上下文")
-        await session.save()
+        await session.save(check=check)
 
 
 def data_session(func):

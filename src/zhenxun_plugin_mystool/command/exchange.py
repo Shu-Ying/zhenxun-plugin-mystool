@@ -22,7 +22,10 @@ from nonebot_plugin_apscheduler import scheduler
 from ..api.common import get_game_record, get_good_list, good_exchange_sync, \
     get_device_fp, \
     good_exchange
-from ..command.common import CommandRegistry
+from .account_selection import (
+    AccountMenu, ask_for_account, require_selected_account, save_selected_account, select_account,
+)
+from .common import CommandRegistry
 from ..model import Good, GameRecord, ExchangeStatus, PluginDataManager, plugin_config, UserAccount, \
     ExchangePlan, ExchangeResult, CommandUsage
 from ..model.common import format_exchange_time
@@ -46,6 +49,7 @@ myb_exchange_plan = on_command(
     priority=5,
     block=True
 )
+ACCOUNT_PROMPT = "请选择要配置兑换计划的米游社账号。"
 
 CommandRegistry.set_usage(
     myb_exchange_plan,
@@ -96,26 +100,17 @@ async def _(
                 f"{myb_exchange_plan_usage.usage.format(HEAD=COMMAND_BEGIN, SEP=get_last_command_sep())}"
             )
 
-    user = PluginDataManager.plugin_data.users.get(event.get_user_id())
-    user_account = user.accounts if user else None
-    if not user_account:
-        await matcher.finish(
-            f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录")
-
-    # 如果使用了二级命令 + - 则跳转进下一步，通过phone选择账户进行设置
     if len(command) > 1:
         state['command_2'] = command[1]
         matcher.set_arg("good_id", command_arg)
-        if len(user_account) == 1:
-            uid = next(iter(user_account.values())).bbs_uid
-            state["bbs_uid"] = uid
-        else:
-            msg = "您有多个账号，您要配置以下哪个账号的兑换计划？\n"
-            msg += "\n".join(map(lambda x: f"🆔{x}", user_account))
-            msg += "\n🚪发送“退出”即可退出"
-            await matcher.send(msg)
+        await ask_for_account(matcher, state, event, ACCOUNT_PROMPT)
     # 如果未使用二级命令，则进行查询操作，并结束交互
     else:
+        data = PluginDataManager.plugin_data
+        user = data.users.get(event.get_user_id())
+        if user is None or not user.accounts:
+            await matcher.finish(f"⚠️你尚未绑定米游社账户，请先使用『{COMMAND_BEGIN}登录』进行登录")
+        menu = AccountMenu.from_data(data, event.get_user_id())
         msg = ""
         for plan in user.exchange_plans:
             good = plan.good
@@ -124,7 +119,7 @@ async def _(
                    f"\n- 🔢商品ID：{good.goods_id}" \
                    f"\n- 💰商品价格：{good.price} 米游币" \
                    f"\n- 📅兑换时间：{slot}" \
-                   f"\n- 🆔账户：{plan.account.display_name}"
+                   f"\n- 👤米游社账号：{menu.label_for(plan.account.bbs_uid)}"
             if reason := plan_pause_reason(plan):
                 explanation = "原兑换时间无法确认，计划已暂停" if reason == "schedule_unconfirmed" else "原兑换场次已过"
                 command_hint = f"{COMMAND_BEGIN}兑换{get_last_command_sep()}+ {good.goods_id}"
@@ -137,24 +132,15 @@ async def _(
         )
 
 
-@myb_exchange_plan.got('bbs_uid')
+@myb_exchange_plan.got('account_choice')
 @data_session
 async def _(
         event: Union[GeneralMessageEvent],
         matcher: Matcher,
         state: T_State,
-        bbs_uid=ArgStr()
+        account_choice=ArgStr()
 ):
-    """
-    请求用户输入手机号以对账户设置兑换计划
-    """
-    if bbs_uid == '退出':
-        await matcher.finish('🚪已成功退出')
-    user_account = PluginDataManager.plugin_data.users[event.get_user_id()].accounts
-    if bbs_uid in user_account:
-        state["bbs_uid"] = bbs_uid
-    else:
-        await matcher.reject('⚠️您发送的账号不在以上账号内，请重新发送')
+    await select_account(matcher, state, event, account_choice, ACCOUNT_PROMPT)
 
 
 @myb_exchange_plan.got('good_id')
@@ -170,7 +156,7 @@ async def _(
     """
     data = PluginDataManager.plugin_data
     user_id = event.get_user_id()
-    account = data.users[user_id].accounts[state['bbs_uid']]
+    account = await require_selected_account(matcher, state, event)
     command_2 = state['command_2']
     if command_2 == '+':
         good_dict = {
@@ -235,7 +221,7 @@ async def _(
         if not plans:
             await matcher.finish(f"该账号没有为商品 {good_id} 设置兑换计划")
         if len(plans) == 1:
-            await remove_exchange_plan(user_id, user, plans[0], matcher)
+            await remove_exchange_plan(matcher, state, event, user, plans[0])
         options = {}
         lines = []
         for index, plan in enumerate(sorted(plans, key=lambda item: (item.scheduled_at or 0, plan_key(item))), 1):
@@ -248,7 +234,6 @@ async def _(
                 target = f"收货地址 {plan.address.id}"
             lines.append(f"{index}. {slot} · {target}")
         state["delete_plan_options"] = options
-        state["delete_plan_owner"] = data.user_bind.get(user_id, user_id)
         await matcher.send("该账号下有多个计划，请发送要删除的计划序号，或发送“退出”。\n" + "\n".join(lines))
 
     else:
@@ -257,10 +242,10 @@ async def _(
         )
 
 
-async def remove_exchange_plan(user_id, user, plan, matcher):
+async def remove_exchange_plan(matcher, state, event, user, plan):
     user.exchange_plans.remove(plan)
-    await PluginDataManager.save()
-    cancel_plan(user_id, plan)
+    await save_selected_account(matcher, state, event)
+    cancel_plan(event.get_user_id(), plan)
     await matcher.finish('兑换计划删除成功')
 
 
@@ -277,29 +262,23 @@ async def _(
     """
     data = PluginDataManager.plugin_data
     user_id = event.get_user_id()
+    if game_uid == '退出':
+        await matcher.finish('🚪已成功退出')
+    account = await require_selected_account(matcher, state, event)
+    user = data.users[user_id]
     if state.get('command_2') == '-':
-        if game_uid == '退出':
-            await matcher.finish('🚪已成功退出')
-        owner_id = data.user_bind.get(user_id, user_id)
-        user = data.users.get(user_id)
-        if owner_id != state['delete_plan_owner'] or user is None:
-            await matcher.finish('账号绑定已变化，请重新发起删除')
         identity = state['delete_plan_options'].get(game_uid)
         if identity is None:
             await matcher.reject('⚠️请选择要删除的计划序号')
         plan = next((item for item in user.exchange_plans if plan_key(item) == identity), None)
         if plan is None:
             await matcher.finish('该计划已不存在，请重新查看兑换计划')
-        await remove_exchange_plan(user_id, user, plan, matcher)
+        await remove_exchange_plan(matcher, state, event, user, plan)
         return
-    user = data.users[user_id]
-    account = user.accounts[state['bbs_uid']]
     good: Good = state['good']
     record = None
     if good.is_virtual:
         records: List[GameRecord] = state['records']
-        if game_uid == '退出':
-            await matcher.finish('🚪已成功退出')
         record_filter = filter(lambda x: x.game_role_id == game_uid, records)
         record = next(record_filter, None)
         if not record:
@@ -328,10 +307,10 @@ async def _(
     }
     user.exchange_plans.difference_update(replaced)
     user.exchange_plans.add(plan)
-    await PluginDataManager.save()
+    await save_selected_account(matcher, state, event)
 
     if not schedule_plan(event.get_user_id(), plan):
-        await PluginDataManager.save()
+        await save_selected_account(matcher, state, event)
         await matcher.finish('⚠️所选兑换场次已过，已保留原计划。请重新选择场次')
 
     await matcher.finish(

@@ -1,10 +1,13 @@
+import re
+from hashlib import sha256
 from typing import Union, Optional, Any, Dict, TYPE_CHECKING, AbstractSet, \
     Mapping, Set, Literal, List
+from unicodedata import category
 from uuid import UUID, uuid4
 
 from httpx import Cookies
 from ..logging import logger
-from pydantic.v1 import BaseModel, validator
+from pydantic.v1 import BaseModel, PrivateAttr, validator
 
 from .._version import __version__
 from ..model.common import BaseModelWithSetter, Address, BaseModelWithUpdate, Good, GameRecord
@@ -241,6 +244,19 @@ class BBSCookies(BaseModelWithSetter, BaseModelWithUpdate):
         return cookies_dict
 
 
+def normalize_community_nickname(nickname: object, uid: Optional[str] = None) -> Optional[str]:
+    if not isinstance(nickname, str):
+        return None
+    nickname = "".join(
+        char for char in nickname
+        if char.isspace() or char in "\u200c\u200d" or category(char) not in {"Cc", "Cf", "Cs"}
+    )
+    nickname = " ".join(nickname.split())
+    if not nickname or (uid and uid in nickname):
+        return None
+    return nickname
+
+
 class UserAccount(BaseModelWithSetter):
     """
     米游社账户数据
@@ -256,6 +272,10 @@ class UserAccount(BaseModelWithSetter):
     """
     phone_number: Optional[str]
     """手机号"""
+    community_nickname: Optional[str] = None
+    web_scanned_at: Optional[int] = None
+    """最近一次确认 Web 扫码的 Unix 时间戳。"""
+    """米游社昵称"""
     cookies: BBSCookies
     """Cookies"""
     address: Optional[Address]
@@ -293,6 +313,7 @@ class UserAccount(BaseModelWithSetter):
     credential_versions: Dict[str, int] = {}
     expired_credentials: Dict[str, str] = {}
     credential_expiry_notices: Dict[str, List[str]] = {}
+    _show_account_label: bool = PrivateAttr(False)
 
     def __init__(self, **data: Any):
         if not data.get("device_id_ios") or not data.get("device_id_android"):
@@ -303,6 +324,10 @@ class UserAccount(BaseModelWithSetter):
                 data.setdefault("device_id_android", generate_device_id())
 
         super().__init__(**data)
+
+    @validator("community_nickname", pre=True)
+    def validate_community_nickname(cls, value):
+        return normalize_community_nickname(value)
 
     @property
     def bbs_uid(self):
@@ -316,12 +341,26 @@ class UserAccount(BaseModelWithSetter):
         self.cookies.bbs_uid = value
 
     @property
-    def display_name(self):
-        """
-        显示名称
-        """
-        from ..utils.common import blur_phone
-        return f"{self.bbs_uid}({blur_phone(self.phone_number)})" if self.phone_number else self.bbs_uid
+    def account_label(self) -> str:
+        identity = f"{self.device_id_android}:{self.bbs_uid}"
+        # Use letters so the suffix cannot be mistaken for an account UID.
+        suffix = sha256(identity.encode()).hexdigest()[:8].translate(
+            str.maketrans("0123456789abcdef", "ABCDEFGHIJKLMNOP")
+        )
+        return f"账号 {suffix}"
+
+    def disambiguate_display_name(self) -> None:
+        self._show_account_label = True
+
+    @property
+    def display_name(self) -> str:
+        nickname = normalize_community_nickname(self.community_nickname, self.bbs_uid)
+        name = re.sub(
+            r"\[CQ:[^\[\]]*\]?",
+            lambda match: match[0].replace("[", "［").replace("]", "］"),
+            nickname or "昵称待更新",
+        )
+        return f"{name}（{self.account_label}）" if self._show_account_label else name
 
 
 class ExchangePlan(BaseModel):

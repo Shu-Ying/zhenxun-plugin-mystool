@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from importlib import import_module
 import json
 from types import SimpleNamespace
@@ -118,7 +119,8 @@ def test_manual_auth_tip_is_available_with_notifications_disabled(expiry_state, 
 
     asyncio.run(check_manual_response())
     assert len(replies) == 1
-    assert "登录 Web 123" in replies[0]
+    assert "登录 Web』后按序号" in replies[0]
+    assert "123" not in replies[0]
     assert not outgoing
     assert not records["users"]["owner"]["enable_notice"]
 
@@ -279,6 +281,7 @@ def test_app_refresh_resumes_at_next_existing_scheduled_run(mystool, monkeypatch
     data = import_module(f"{package}.model.data")
     account = make_account(mystool)
     account.enable_game_sign = False
+    account.web_scanned_at = int(datetime(2026, 11, 27, 17, tzinfo=timezone.utc).timestamp())
     calls = []
     notices = []
 
@@ -311,7 +314,7 @@ def test_app_refresh_resumes_at_next_existing_scheduled_run(mystool, monkeypatch
             await plan.daily_schedule()
             assert calls == ["v2_app"]
             assert [user_id for user_id, _ in notices] == ["owner", "shared"]
-            assert all("登录 App 123" in message for _, message in notices)
+            assert all("登录 App』后按序号" in message and "123" not in message for _, message in notices)
 
             target = login.select_login(await repository.load(), "shared", "123")
             app = passport.AppCredentials(uid="123", mid="mid", stoken="v2_fresh")
@@ -321,8 +324,10 @@ def test_app_refresh_resumes_at_next_existing_scheduled_run(mystool, monkeypatch
             assert calls == ["v2_app"]
             await plan.daily_schedule()
             assert calls == ["v2_app", "v2_fresh", "v2_fresh"]
-            assert len([msg for _, msg in notices if "登录 App 123" in msg]) == 2
+            assert len([msg for _, msg in notices if "登录 App』后按序号" in msg]) == 2
+            assert len([msg for _, msg in notices if msg.endswith("2026年12月28日过期。")]) == 2
             current = (await repository.load())["accounts"][("owner", "123")]
+            assert current["web_scanned_at"] == account.web_scanned_at
             assert current["enable_mission"]
             assert not current["enable_game_sign"]
             assert not current["expired_credentials"]
@@ -330,3 +335,38 @@ def test_app_refresh_resumes_at_next_existing_scheduled_run(mystool, monkeypatch
             await Tortoise.close_connections()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("has_web_scan", [True, False])
+def test_scheduled_myb_summary_ends_with_estimated_web_token_expiry(
+    mystool, expiry_state, monkeypatch, has_web_scan,
+):
+    plan = import_module(f"{mystool.__name__}.command.plan")
+    status = import_module(f"{mystool.__name__}.model.common").BaseApiStatus
+    _, account, _, outgoing = expiry_state
+    timestamp = int(datetime(2026, 11, 27, 17, tzinfo=timezone.utc).timestamp())
+    account = account.copy(update={
+        "community_nickname": "星夜", "mission_games": [],
+        "web_scanned_at": timestamp if has_web_scan else None,
+    })
+    user = plan.UserData(accounts={"123": account})
+
+    async def missions(_account):
+        return status(success=True), SimpleNamespace(
+            current_myb=100, state_dict={plan.BaseMission.SIGN: (SimpleNamespace(threshold=1), 0)},
+        )
+
+    async def send_private(user_id, message):
+        outgoing.append((user_id, message))
+        return True, None
+
+    monkeypatch.setattr(plan, "get_missions_state", missions)
+    monkeypatch.setattr(plan, "send_private_msg", send_private)
+    asyncio.run(plan.perform_bbs_sign(user, ["owner"], owner_id="owner"))
+    assert len(outgoing) == 1
+    summary = outgoing[0][1].splitlines()
+    assert summary[:3] == ["⚠️今日米游币任务未全部完成", "🆔账户 星夜", "📅签到：✕"]
+    if has_web_scan:
+        assert summary[-1] == "🔔网页 Token 预计于 2026年12月28日过期。"
+    else:
+        assert summary[-1] == "🔔网页 Token 到期日尚未记录，完成一次 Web 扫码后会显示。"

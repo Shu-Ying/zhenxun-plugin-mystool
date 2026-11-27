@@ -152,7 +152,8 @@ def cookie_dict_to_str(cookie_dict: Dict[str, str]) -> str:
 
 
 def generate_ds(data: Union[str, dict, list, None] = None, params: Union[str, dict, None] = None,
-                platform: Literal["ios", "android"] = "ios", salt: Optional[str] = None):
+                platform: Literal["ios", "android"] = "ios", salt: Optional[str] = None,
+                *, ds2: bool = False):
     """
     获取Headers中所需DS
 
@@ -160,9 +161,10 @@ def generate_ds(data: Union[str, dict, list, None] = None, params: Union[str, di
     :param params: 可选，URL参数
     :param platform: 可选，平台，ios或android
     :param salt: 可选，自定义salt
+    :param ds2: 为显式指定的 DS2 盐值保留请求体与查询参数
     """
-    if data is None and params is None or \
-            salt is not None and salt != plugin_env.salt_config.SALT_PROD:
+    if not ds2 and (data is None and params is None or
+                    salt is not None and salt != plugin_env.salt_config.SALT_PROD):
         if platform == "ios":
             salt = salt or plugin_env.salt_config.SALT_IOS
         else:

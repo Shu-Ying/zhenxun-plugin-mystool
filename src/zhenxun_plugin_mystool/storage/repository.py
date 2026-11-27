@@ -18,6 +18,28 @@ class ConcurrentUpdateError(RuntimeError):
     pass
 
 
+def merge_concurrent_nickname(old, pending, actual):
+    if old is None or actual is None:
+        raise ConcurrentUpdateError("数据已被其他操作更新，请重新执行")
+    baseline, current = old.copy(), actual.copy()
+    old_nickname = baseline.pop("community_nickname", None)
+    current_nickname = current.pop("community_nickname", None)
+    if baseline != current or (
+        pending is not None and pending.get("community_nickname") not in (old_nickname, current_nickname)
+    ):
+        raise ConcurrentUpdateError("数据已被其他操作更新，请重新执行")
+
+    # A nickname backfill is independent of changes to account settings and deletion.
+    if pending is None:
+        return None
+    merged = pending.copy()
+    if current_nickname is None:
+        merged.pop("community_nickname", None)
+    else:
+        merged["community_nickname"] = current_nickname
+    return merged
+
+
 class Repository:
     _locks = WeakKeyDictionary()
 
@@ -61,7 +83,9 @@ class Repository:
                     continue
                 actual = latest[group].get(key)
                 if actual != old and actual != new:
-                    raise ConcurrentUpdateError("数据已被其他操作更新，请重新执行")
+                    if group != "accounts":
+                        raise ConcurrentUpdateError("数据已被其他操作更新，请重新执行")
+                    new = merge_concurrent_nickname(old, new, actual)
                 if key in pending[group]:
                     merged[group][key] = new
                 else:
@@ -114,8 +138,13 @@ class Repository:
                 )
 
     @classmethod
-    async def commit(cls, base, pending):
-        merged, _ = await cls._write(lambda latest: (cls.merge(base, pending, latest), None))
+    async def commit(cls, base, pending, *, check=None):
+        def merge_latest(latest):
+            if check is not None:
+                check(latest)
+            return cls.merge(base, pending, latest), None
+
+        merged, _ = await cls._write(merge_latest)
         return merged
 
     @classmethod
